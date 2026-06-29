@@ -79,3 +79,22 @@ async def save_artifact(job_id: str, req: SaveArtifactRequest):
     out = artifacts_dir / f"{req.stage}.json"
     out.write_text(json.dumps(req.content, ensure_ascii=False, indent=2))
     return {"saved": req.stage, "path": str(out)}
+
+
+@router.post("/{job_id}/retry")
+async def retry_job(job_id: str, bg: BackgroundTasks):
+    """Re-run a failed (or stuck) job from the current stage."""
+    job = job_store.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.get("status") not in ("failed", "running"):
+        raise HTTPException(400, "Only failed or stuck jobs can be retried")
+    job_store.update(job_id, status="queued")
+    bg.add_task(run_pipeline_job, job_id, {
+        "project_name": job.get("project_name", job_id),
+        "content_type": job.get("content_type", "marketing_film"),
+        "pipeline": job.get("pipeline", "cinematic"),
+        "brand_info": job.get("brand_info", {}),
+        "options": job.get("options", {}),
+    })
+    return {"job_id": job_id, "status": "queued"}

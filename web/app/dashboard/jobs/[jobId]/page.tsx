@@ -43,6 +43,7 @@ export default function JobDetailPage() {
   // Approval state
   const [feedback, setFeedback] = useState("");
   const [approving, setApproving] = useState(false);
+  const [retrying, setRetrying] = useState(false);
 
   // Inline edit state
   const [editMode, setEditMode] = useState(false);
@@ -95,6 +96,13 @@ export default function JobDetailPage() {
   }, [jobId]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [events]);
+
+  async function handleRetry() {
+    setRetrying(true);
+    await fetch(`${SERVER}/jobs/${jobId}/retry`, { method: "POST" });
+    setStatus("queued");
+    setRetrying(false);
+  }
 
   async function handleApproval(action: "approve" | "reject") {
     setApproving(true);
@@ -175,6 +183,21 @@ export default function JobDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Failed state retry */}
+      {status === "failed" && (
+        <Card className="border-red-500/40 bg-red-500/5">
+          <CardContent className="pt-4 pb-4 flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-red-400">阶段失败</p>
+              <p className="text-xs text-muted-foreground mt-0.5">可以从当前阶段重新触发（已生成的 artifacts 不会清除）</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={handleRetry} disabled={retrying} className="border-red-500/40 text-red-400 hover:bg-red-500/10">
+              {retrying ? "重试中…" : "↺ 重试"}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Approval + inline edit panel */}
       {awaitingStage && (
