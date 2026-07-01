@@ -7,26 +7,13 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import {
+  CONTENT_TYPES, isPipelineAvailable, computeMorePipelines, toPipelineOption,
+  type PipelineInfo, type PipelineOption,
+} from "@/lib/pipeline-picker";
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
-// Friendly Chinese entry points mapped to engine pipelines.
-const CONTENT_TYPES = [
-  { id: "marketing_film", label: "营销宣传片", description: "品牌故事 · 产品发布 · 15-60 秒情感向短片", pipeline: "cinematic" },
-  { id: "explainer",      label: "解说视频",   description: "动态图文 · 功能演示 · 教程",              pipeline: "animated-explainer" },
-  { id: "podcast",        label: "播客剪辑",   description: "长音频 → 短视频精华片段",                pipeline: "podcast-repurpose" },
-  { id: "demo",           label: "产品演示",   description: "屏幕录制 + AI 旁白讲解",                 pipeline: "screen-demo" },
-  { id: "short",          label: "短视频批量", description: "长视频 → 多条竖屏短片",                  pipeline: "clip-factory" },
-];
-
-type PipelineInfo = {
-  name: string;
-  description: string;
-  category?: string;
-  stability?: string;
-  stages: string[];
-};
-type PipelineOption = { id: string; label: string; description: string; pipeline: string; stability?: string };
 type BrandKit = { kit_id: string; brand_name: string; slogan: string };
 type Step = "type" | "wizard";
 
@@ -59,9 +46,7 @@ export default function NewProjectPage() {
   }, []);
 
   const availableNames = new Set(pipelines.map((p) => p.name));
-  const featuredPipelines = new Set(CONTENT_TYPES.map((c) => c.pipeline));
-  // Engine pipelines that don't have a curated Chinese card — offered directly.
-  const morePipelines = pipelines.filter((p) => !featuredPipelines.has(p.name));
+  const morePipelines = computeMorePipelines(pipelines);
 
   function applyKit(kit: BrandKit) {
     setForm((f) => ({
@@ -120,7 +105,7 @@ export default function NewProjectPage() {
           {CONTENT_TYPES.map((ct) => {
             // Available once the engine reports the mapped pipeline (or before
             // /pipelines has loaded, so the UI isn't empty on first paint).
-            const available = availableNames.size === 0 || availableNames.has(ct.pipeline);
+            const available = isPipelineAvailable(availableNames, ct.pipeline);
             return (
               <button
                 key={ct.id}
@@ -157,7 +142,7 @@ export default function NewProjectPage() {
                 <button
                   key={p.name}
                   onClick={() => {
-                    setSelectedType({ id: p.name, label: p.name, description: p.description, pipeline: p.name, stability: p.stability });
+                    setSelectedType(toPipelineOption(p));
                     setStep("wizard");
                   }}
                   className="text-left p-4 rounded-lg border border-border hover:border-foreground/40 hover:bg-accent cursor-pointer transition-colors"
