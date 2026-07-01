@@ -10,6 +10,7 @@ jobs that were interrupted by the restart are surfaced as failed+retryable.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import json
 import threading
 import time
@@ -161,7 +162,12 @@ class JobStore:
     def get_events(self, job_id: str, after_seq: int = -1) -> list[dict]:
         with self._lock:
             events = self._events.get(job_id, [])
-            return [e for e in events if e["seq"] > after_seq]
+            if not events:
+                return []
+            # seq is strictly ascending → binary-search the cut point instead of
+            # scanning all (up to MAX_EVENTS_PER_JOB) events on every 0.5s poll.
+            idx = bisect.bisect_right(events, after_seq, key=lambda e: e["seq"])
+            return events[idx:]
 
     # ---- Approval gate ----
 

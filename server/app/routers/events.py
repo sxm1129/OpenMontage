@@ -22,12 +22,13 @@ async def job_events(job_id: str, lastEventId: int = -1):
                 yield f"id: {seq}\ndata: {data}\n\n"
                 if ev.get("type") in ("job_completed", "job_failed"):
                     return
-            # If the job already finished and we've drained every event, close
-            # instead of looping forever (a reconnect after completion would
-            # otherwise leak a connection that never yields again).
-            job = job_store.get(job_id)
-            if job is None or job.get("status") in TERMINAL_STATUSES:
-                if not job_store.get_events(job_id, after_seq=seq):
+            # Nothing new this tick: if the job is already terminal we've drained
+            # everything, so close instead of looping forever (a reconnect after
+            # completion would otherwise leak a connection). No second query —
+            # an empty drain IS the "caught up" signal.
+            if not events:
+                job = job_store.get(job_id)
+                if job is None or job.get("status") in TERMINAL_STATUSES:
                     return
             await asyncio.sleep(0.5)
 
