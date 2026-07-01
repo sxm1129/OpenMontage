@@ -26,18 +26,27 @@ def list_manifest_names() -> list[str]:
 def load_manifest(name: str) -> dict[str, Any]:
     """Return a manifest dict. Strict validation first, lenient YAML on drift.
 
-    Raises FileNotFoundError if the manifest file genuinely doesn't exist.
+    Raises FileNotFoundError if the manifest file doesn't exist OR isn't one of
+    the known pipeline names — `name` reaches here from user-controlled input
+    (POST /jobs "pipeline" field, GET /pipelines/{name}), so it is validated
+    against the real manifest set before touching the filesystem. This blocks
+    "../" traversal / arbitrary-path reads that an f-string path join alone
+    would not.
     """
+    if name not in list_manifest_names():
+        raise FileNotFoundError(f"Unknown pipeline: {name!r}")
     path = PIPELINE_DEFS_DIR / f"{name}.yaml"
-    if not path.exists():
-        raise FileNotFoundError(f"Pipeline manifest not found: {path}")
     try:
         from lib.pipeline_loader import load_pipeline
-        return load_pipeline(name)
+        manifest = load_pipeline(name)
     except FileNotFoundError:
         raise
     except Exception:
         # Schema drift or a loader hiccup — fall back to a raw read so the
         # pipeline stays usable. Validation is best-effort, not a gate here.
         import yaml
-        return yaml.safe_load(path.read_text())
+        manifest = yaml.safe_load(path.read_text())
+    # yaml.safe_load on an empty/null-only file returns None — never hand that
+    # back to callers that assume a dict (GET /pipelines would 500 for ALL
+    # pipelines, not just the malformed one).
+    return manifest or {}

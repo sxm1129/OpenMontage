@@ -32,6 +32,25 @@ def _events(store, jid):
     return [e["type"] for e in store.get_events(jid, after_seq=-1)]
 
 
+async def test_skill_less_stage_does_not_crash(runner, monkeypatch):
+    # Regression: a manifest stage with no `skill` key must resolve to
+    # skill=None and fall through to the placeholder text, not crash trying to
+    # read_text() on OM_ROOT (Path(OM_ROOT) / "" == OM_ROOT, a real directory).
+    seen_skill_text = []
+    def capture(job_id, stage_name, skill_text, *a, **k):
+        seen_skill_text.append(skill_text)
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", capture)
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic",
+                        [{"name": "research", "skill": None, "approval": False}])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    assert runner.get("j")["status"] == "completed"
+    assert "director" in seen_skill_text[0]   # placeholder fallback text used
+
+
 async def test_happy_path_completes(runner, monkeypatch):
     monkeypatch.setattr(stage_runner, "_run_agent_stage", lambda *a, **k: True)
     runner.create("j", {"project_name": "p", "pipeline": "cinematic"})

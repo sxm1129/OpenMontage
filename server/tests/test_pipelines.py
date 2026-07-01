@@ -71,3 +71,44 @@ def test_pipeline_detail_endpoint_and_404():
     # a schema-drifted manifest still returns detail (not 400)
     assert client.get("/pipelines/screen-demo").status_code == 200
     assert client.get("/pipelines/definitely-not-real").status_code == 404
+
+
+# ── security/robustness regressions found by the follow-up audit ────────────
+
+def test_skill_less_stage_resolves_none_not_directory():
+    # framework-smoke's research/script stages declare no `skill` key. Before
+    # the fix this resolved to "" and Path(OM_ROOT) / "" == OM_ROOT (a real,
+    # existing directory), defeating the missing-skill fallback and crashing
+    # read_text() with IsADirectoryError on the very first stage.
+    stages = _resolve_stages("framework-smoke")
+    assert stages, "framework-smoke should resolve real stages, not fall back"
+    skill_less = [s for s in stages if s["skill"] is None]
+    assert skill_less, "expected at least one skill-less stage in framework-smoke"
+
+
+def test_pipeline_name_traversal_is_blocked():
+    from app.pipeline_catalog import load_manifest
+    import pytest
+    for bad in ("../config", "../../etc/passwd", "../../../../etc/passwd", "not-a-real-pipeline"):
+        with pytest.raises(FileNotFoundError):
+            load_manifest(bad)
+
+
+def test_traversal_via_detail_endpoint_returns_404():
+    # Not a route-level slash — "../config" has no literal "/", so FastAPI's
+    # plain {name} path param matches it; only load_manifest's allowlist stops it.
+    assert client.get("/pipelines/../config").status_code in (404, 307, 308)
+
+
+def test_load_manifest_never_returns_none(tmp_path, monkeypatch):
+    import app.pipeline_catalog as pc
+    import lib.pipeline_loader as pl
+
+    (tmp_path / "empty.yaml").write_text("")
+    monkeypatch.setattr(pc, "PIPELINE_DEFS_DIR", tmp_path)
+    # Simulate strict validation failing (schema drift) so the lenient
+    # yaml.safe_load fallback runs — on an empty file that returns None.
+    monkeypatch.setattr(pl, "load_pipeline",
+                        lambda name, defs_dir=None: (_ for _ in ()).throw(ValueError("drift")))
+    result = pc.load_manifest("empty")
+    assert result == {}

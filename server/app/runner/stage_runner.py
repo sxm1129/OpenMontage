@@ -84,7 +84,11 @@ def _resolve_stages(pipeline_name: str) -> list[dict]:
             skill = s.get("skill")
             stages.append({
                 "name": s["name"],
-                "skill": f"skills/{skill}.md" if skill else "",
+                # None (not "") for skill-less stages — Path(OM_ROOT) / "" is
+                # OM_ROOT itself (a directory that .exists()), which would
+                # defeat the missing-skill fallback below and crash on
+                # read_text(). None makes "no skill" unambiguous.
+                "skill": f"skills/{skill}.md" if skill else None,
                 "approval": bool(s.get("human_approval_default", False)),
             })
         if stages:
@@ -424,7 +428,7 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
 
     for stage_def in stages:
         stage_name = stage_def["name"]
-        skill_path = OM_ROOT / stage_def["skill"]
+        skill_rel = stage_def.get("skill")
         needs_approval = stage_def["approval"]
 
         # Resume support: a retry must NOT re-run or overwrite stages that already
@@ -436,8 +440,16 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         job_store.update(job_id, current_stage=stage_name, status="running")
         _emit(job_id, {"type": "stage_started", "stage": stage_name})
 
-        # Load director skill
-        skill_text = skill_path.read_text(encoding="utf-8") if skill_path.exists() else f"# {stage_name} director\nExecute the {stage_name} stage."
+        # Load director skill. Some manifest stages (e.g. sub_stages-only or
+        # deliberately instruction-free stages) declare no skill at all —
+        # skill_rel is None there, not "" (Path(OM_ROOT) / "" is OM_ROOT
+        # itself, a directory, which would defeat this fallback).
+        skill_path = (OM_ROOT / skill_rel) if skill_rel else None
+        skill_text = (
+            skill_path.read_text(encoding="utf-8")
+            if skill_path and skill_path.exists()
+            else f"# {stage_name} director\nExecute the {stage_name} stage."
+        )
 
         # Run stage in thread pool (blocking sync LLM calls must not block event loop).
         # A pre-call budget block raises BudgetExceededError out of the thread —
