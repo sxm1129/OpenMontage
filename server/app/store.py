@@ -7,6 +7,13 @@ import threading
 import time
 from typing import Any
 
+# Cap the retained per-job event ring so a long-running job can't grow the
+# buffer without bound. Reconnecting clients still get recent events; very old
+# events beyond the cap are no longer replayable (acceptable for a live view).
+MAX_EVENTS_PER_JOB = 5000
+
+TERMINAL_STATUSES = {"completed", "failed"}
+
 
 class JobStore:
     """Thread-safe in-memory store for job state and SSE event queues."""
@@ -14,6 +21,7 @@ class JobStore:
     def __init__(self):
         self._jobs: dict[str, dict] = {}
         self._events: dict[str, list[dict]] = {}
+        self._event_seq: dict[str, int] = {}   # monotonic seq per job (survives buffer trim)
         self._approval_events: dict[str, asyncio.Event] = {}
         self._approval_results: dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -25,11 +33,13 @@ class JobStore:
                 "status": "queued",
                 "current_stage": None,
                 "stages": [],
+                "completed_stages": [],
                 "cost_cny": 0.0,
                 "created_at": time.time(),
                 **data,
             }
             self._events[job_id] = []
+            self._event_seq[job_id] = 0
             self._approval_events[job_id] = asyncio.Event()
 
     def all(self) -> dict[str, dict]:
@@ -47,9 +57,15 @@ class JobStore:
 
     def push_event(self, job_id: str, event: dict) -> None:
         with self._lock:
-            if job_id in self._events:
-                seq = len(self._events[job_id])
-                self._events[job_id].append({"seq": seq, **event})
+            if job_id not in self._events:
+                return
+            seq = self._event_seq.get(job_id, 0)
+            self._event_seq[job_id] = seq + 1
+            buf = self._events[job_id]
+            buf.append({"seq": seq, **event})
+            # Trim oldest while keeping seq values intact for replay filtering.
+            if len(buf) > MAX_EVENTS_PER_JOB:
+                del buf[: len(buf) - MAX_EVENTS_PER_JOB]
 
     def get_events(self, job_id: str, after_seq: int = -1) -> list[dict]:
         with self._lock:

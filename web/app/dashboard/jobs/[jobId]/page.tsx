@@ -55,9 +55,13 @@ export default function JobDetailPage() {
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastSeqRef = useRef(-1);
+  const doneRef = useRef(false);        // job reached a terminal state
+  const cancelledRef = useRef(false);   // component unmounted — stop reconnecting
 
   useEffect(() => {
+    cancelledRef.current = false;
     const connect = () => {
+      if (cancelledRef.current) return null;
       const url = `${SERVER}/jobs/${jobId}/events?lastEventId=${lastSeqRef.current}`;
       const es = new EventSource(url);
       es.onmessage = (e) => {
@@ -86,18 +90,23 @@ export default function JobDetailPage() {
         if (ev.type === "job_completed") {
           setStatus("completed");
           setRenderUrl(ev.render_url ?? null);
+          doneRef.current = true;
           es.close();
         }
-        if (ev.type === "job_failed") { setStatus("failed"); es.close(); }
+        if (ev.type === "job_failed") { setStatus("failed"); doneRef.current = true; es.close(); }
       };
       es.onerror = () => {
         es.close();
-        if (!["completed", "failed"].includes(status)) setTimeout(connect, 2000);
+        // Reconnect only while the job is live and the view is still mounted.
+        // (Uses refs, not the captured `status`, which would be stale here.)
+        if (!doneRef.current && !cancelledRef.current) {
+          setTimeout(() => { if (!cancelledRef.current && !doneRef.current) connect(); }, 2000);
+        }
       };
       return es;
     };
     const es = connect();
-    return () => es.close();
+    return () => { cancelledRef.current = true; es?.close(); };
   }, [jobId]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [events]);

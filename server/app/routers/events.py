@@ -5,7 +5,7 @@ import json
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from app.store import job_store
+from app.store import job_store, TERMINAL_STATUSES
 
 router = APIRouter()
 
@@ -21,6 +21,13 @@ async def job_events(job_id: str, lastEventId: int = -1):
                 data = json.dumps(ev, ensure_ascii=False)
                 yield f"id: {seq}\ndata: {data}\n\n"
                 if ev.get("type") in ("job_completed", "job_failed"):
+                    return
+            # If the job already finished and we've drained every event, close
+            # instead of looping forever (a reconnect after completion would
+            # otherwise leak a connection that never yields again).
+            job = job_store.get(job_id)
+            if job is None or job.get("status") in TERMINAL_STATUSES:
+                if not job_store.get_events(job_id, after_seq=seq):
                     return
             await asyncio.sleep(0.5)
 
