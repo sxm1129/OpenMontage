@@ -41,6 +41,8 @@ export default function BrandsPage() {
     if (res.ok) setKits((await res.json()).brand_kits ?? []);
   }
 
+  // Async fetch: setState happens after await, not synchronously in the effect.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, []);
 
   function startCreate() {
@@ -179,7 +181,7 @@ export default function BrandsPage() {
                     )}
                   </div>
                   {kit.slogan && (
-                    <p className="text-xs text-muted-foreground mt-0.5 italic">"{kit.slogan}"</p>
+                    <p className="text-xs text-muted-foreground mt-0.5 italic">&ldquo;{kit.slogan}&rdquo;</p>
                   )}
                   <div className="flex gap-3 mt-2 flex-wrap">
                     {kit.tone_keywords.slice(0, 4).map((k) => (

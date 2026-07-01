@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 type Job = {
@@ -47,6 +46,8 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
+    // Async fetch: setState happens after await, not synchronously in the effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchJobs();
     // Poll every 8s so status badges update
     const id = setInterval(fetchJobs, 8000);
