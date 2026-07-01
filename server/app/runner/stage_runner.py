@@ -245,8 +245,24 @@ After writing the artifact, confirm briefly what you produced.
 
 
 async def run_pipeline_job(job_id: str, data: dict) -> None:
-    """Async entry point called by FastAPI BackgroundTasks."""
+    """Async entry point called by FastAPI BackgroundTasks.
 
+    Wrapped in a last-resort guard so any unhandled error marks the job failed
+    and surfaces via SSE, instead of leaving it silently stuck at 'running'.
+    """
+    try:
+        await _run_pipeline_impl(job_id, data)
+    except Exception as exc:  # noqa: BLE001 — deliberate catch-all backstop
+        import traceback
+        job_store.update(job_id, status="failed")
+        _emit(job_id, {
+            "type": "job_failed",
+            "message": f"Unhandled pipeline error: {exc}",
+            "trace": traceback.format_exc()[-1500:],
+        })
+
+
+async def _run_pipeline_impl(job_id: str, data: dict) -> None:
     pipeline_name = data.get("pipeline", "cinematic")
     stages = PIPELINE_MAP.get(pipeline_name, CINEMATIC_STAGES)
     brand_info = data.get("brand_info", {})
@@ -259,17 +275,36 @@ async def run_pipeline_job(job_id: str, data: dict) -> None:
     (project_dir / "assets").mkdir(exist_ok=True)
     (project_dir / "renders").mkdir(exist_ok=True)
 
-    # USD→CNY exchange rate (approximate, good enough for cost display)
-    USD_TO_CNY = 7.25
-    cost_accumulator: list[float] = []  # list of cost_usd floats from tool calls
+    # MaaS tools bill in CNY (the user owns the gateway) and their cost_usd field
+    # already carries CNY amounts, so accumulate directly — no FX conversion.
+    cost_accumulator: list[float] = []
+    job = job_store.get(job_id) or {}
+    base_cost = float(job.get("cost_cny", 0.0) or 0.0)          # preserve across retries
+    completed_stages: set[str] = set(job.get("completed_stages", []))
+
+    def _sync_cost(stage_name: str) -> None:
+        cost_cny = round(base_cost + sum(cost_accumulator), 4)
+        job_store.update(job_id, cost_cny=cost_cny)
+        _emit(job_id, {"type": "cost_updated", "cost_cny": cost_cny, "stage": stage_name})
 
     job_store.update(job_id, status="running", project_dir=str(project_dir))
-    _emit(job_id, {"type": "job_started", "pipeline": pipeline_name, "stages": [s["name"] for s in stages]})
+    _emit(job_id, {
+        "type": "job_started",
+        "pipeline": pipeline_name,
+        "stages": [s["name"] for s in stages],
+        "resumed": bool(completed_stages),
+    })
 
     for stage_def in stages:
         stage_name = stage_def["name"]
         skill_path = OM_ROOT / stage_def["skill"]
         needs_approval = stage_def["approval"]
+
+        # Resume support: a retry must NOT re-run or overwrite stages that already
+        # finished (and, for approval stages, were already approved).
+        if stage_name in completed_stages:
+            _emit(job_id, {"type": "stage_skipped", "stage": stage_name})
+            continue
 
         job_store.update(job_id, current_stage=stage_name, status="running")
         _emit(job_id, {"type": "stage_started", "stage": stage_name})
@@ -286,10 +321,7 @@ async def run_pipeline_job(job_id: str, data: dict) -> None:
                 job_id, stage_name, skill_text, project_dir,
                 brand_info, options, feedback, cost_accumulator,
             )
-            # Update cost after each stage
-            cost_cny = round(sum(cost_accumulator) * USD_TO_CNY, 4)
-            job_store.update(job_id, cost_cny=cost_cny)
-            _emit(job_id, {"type": "cost_updated", "cost_cny": cost_cny, "stage": stage_name})
+            _sync_cost(stage_name)
             if success:
                 break
             _emit(job_id, {"type": "stage_retry", "stage": stage_name, "round": _round + 1})
@@ -301,37 +333,46 @@ async def run_pipeline_job(job_id: str, data: dict) -> None:
 
         _emit(job_id, {"type": "stage_completed", "stage": stage_name})
 
-        # Human approval gate
+        # Human approval gate — loop so repeated rejections each regenerate AND
+        # re-present for approval (previously a rejected artifact silently passed).
         if needs_approval:
-            artifacts = _load_artifacts(project_dir)
-            preview = artifacts.get(stage_name) or artifacts.get(
-                {"proposal": "proposal_packet"}.get(stage_name, stage_name)
-            )
-            job_store.update(job_id, status="awaiting_approval")
-            _emit(job_id, {
-                "type": "awaiting_approval",
-                "stage": stage_name,
-                "preview": preview,
-            })
+            def _preview() -> Any:
+                arts = _load_artifacts(project_dir)
+                return arts.get(stage_name) or arts.get(
+                    {"proposal": "proposal_packet"}.get(stage_name, stage_name)
+                )
 
+            job_store.update(job_id, status="awaiting_approval")
+            _emit(job_id, {"type": "awaiting_approval", "stage": stage_name, "preview": _preview()})
             approval = await job_store.wait_for_approval(job_id, timeout=3600.0)
-            if approval["action"] == "reject":
+
+            while approval["action"] == "reject":
                 feedback = approval.get("feedback", "")
                 job_store.update(job_id, status="running")
                 _emit(job_id, {"type": "stage_rejected", "stage": stage_name, "feedback": feedback})
-                # Re-run the stage with feedback
-                success = _run_agent_stage(
+                # Re-run with feedback in a thread (never block the loop) and keep
+                # accumulating cost.
+                success = await asyncio.to_thread(
+                    _run_agent_stage,
                     job_id, stage_name, skill_text, project_dir,
-                    brand_info, options, feedback
+                    brand_info, options, feedback, cost_accumulator,
                 )
+                _sync_cost(stage_name)
                 if not success:
                     job_store.update(job_id, status="failed")
                     _emit(job_id, {"type": "job_failed", "stage": stage_name})
                     return
                 _emit(job_id, {"type": "stage_completed", "stage": stage_name})
-            else:
-                job_store.update(job_id, status="running")
-                _emit(job_id, {"type": "stage_approved", "stage": stage_name})
+                job_store.update(job_id, status="awaiting_approval")
+                _emit(job_id, {"type": "awaiting_approval", "stage": stage_name, "preview": _preview()})
+                approval = await job_store.wait_for_approval(job_id, timeout=3600.0)
+
+            job_store.update(job_id, status="running")
+            _emit(job_id, {"type": "stage_approved", "stage": stage_name})
+
+        # Mark done so a later retry resumes after this stage.
+        completed_stages.add(stage_name)
+        job_store.update(job_id, completed_stages=sorted(completed_stages))
 
     # All stages complete — locate the final deliverable robustly.
     # Prefer renders/, but fall back to any mp4 under assets/ (or a misnamed
