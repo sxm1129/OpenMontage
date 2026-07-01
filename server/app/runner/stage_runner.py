@@ -64,6 +64,7 @@ PIPELINE_MAP = {
 
 MAX_TURNS  = 20
 MAX_ROUNDS = 2   # reviewer sends back at most twice per stage
+TOOL_RESULT_CHAR_CAP = 8000   # cap each tool result appended to history
 
 
 def _emit(job_id: str, event: dict) -> None:
@@ -171,8 +172,12 @@ After writing the artifact, confirm briefly what you produced.
                 "text": msg.content[:500],
             })
 
-        if not msg.tool_calls or finish == "stop":
-            # Agent finished this stage
+        if not msg.tool_calls:
+            # No tools to run → the agent is done with this stage. Do NOT gate
+            # on finish_reason: OpenAI-compatible gateways (aiapbot proxies
+            # Anthropic/DashScope/etc.) may report finish_reason=="stop" even
+            # when the message carries tool_calls; gating on "stop" would drop
+            # those calls and mark the stage complete without running them.
             return True
 
         # Append assistant message
@@ -240,6 +245,12 @@ After writing the artifact, confirm briefly what you produced.
                     "stage": stage_name,
                     "message": f"Tool {tool_name} error: {exc}",
                 })
+
+            # Cap each tool result before it enters the running history — over
+            # MAX_TURNS turns, uncapped read_file/tool outputs can otherwise
+            # exceed the model context window and fail the next completion call.
+            if len(result) > TOOL_RESULT_CHAR_CAP:
+                result = result[:TOOL_RESULT_CHAR_CAP] + f"\n\n[truncated — {len(result)} total chars]"
 
             messages.append({
                 "role": "tool",
