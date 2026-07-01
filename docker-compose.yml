@@ -24,9 +24,13 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      - PYTHONPATH=/app
+      # Both the repo root (for tools/lib) and the server dir (for the `app`
+      # package) must be importable — see server/Dockerfile.
+      - PYTHONPATH=/app:/app/server
     volumes:
       - ./projects:/app/projects
+      - ./.jobstore:/app/.jobstore
+      - ./brand_kits:/app/brand_kits
       - ./tools:/app/tools
       - ./lib:/app/lib
       - ./skills:/app/skills
