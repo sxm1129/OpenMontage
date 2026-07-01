@@ -32,6 +32,15 @@ class AsyncioJobQueue(JobQueue):
 
     name = "asyncio"
 
+    def __init__(self) -> None:
+        # The event loop only holds a WEAK reference to tasks from create_task,
+        # so a fire-and-forget task can be garbage-collected mid-run (the job
+        # would just vanish between await points). Hold a strong reference until
+        # the task finishes.
+        self._tasks: set[asyncio.Task] = set()
+
     def enqueue(self, coro_fn: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any) -> None:
         loop = asyncio.get_event_loop()
-        loop.create_task(coro_fn(*args, **kwargs))
+        task = loop.create_task(coro_fn(*args, **kwargs))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
