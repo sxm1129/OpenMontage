@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
+import { StatusBadge, EventRow, type SseEvent } from "@/components/job-status";
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
@@ -15,23 +16,6 @@ const STAGE_LABELS: Record<string, string> = {
   research: "调研", proposal: "提案", script: "脚本",
   scene_plan: "分镜", assets: "素材", edit: "剪辑",
   compose: "合成", publish: "发布", budget: "预算",
-};
-
-type SseEvent = {
-  seq: number;
-  type: string;
-  ts: number;
-  stage?: string;
-  text?: string;
-  tool?: string;
-  summary?: string;
-  artifact?: string;
-  preview?: unknown;
-  render_url?: string;
-  message?: string;
-  cost_cny?: number;
-  budget_cny?: number | null;
-  gate?: string;
 };
 
 export default function JobDetailPage() {
@@ -348,38 +332,3 @@ export default function JobDetailPage() {
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const MAP: Record<string, { label: string; cls: string }> = {
-    queued:            { label: "排队中", cls: "bg-muted text-muted-foreground border-border" },
-    running:           { label: "生成中", cls: "bg-blue-500/20 text-blue-400 border-blue-500/30" },
-    awaiting_approval: { label: "待审批", cls: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30" },
-    completed:         { label: "已完成", cls: "bg-green-500/20 text-green-400 border-green-500/30" },
-    failed:            { label: "失败",   cls: "bg-red-500/20 text-red-400 border-red-500/30" },
-  };
-  const s = MAP[status] ?? MAP.queued;
-  return (
-    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border ${s.cls}`}>
-      {s.label}
-    </span>
-  );
-}
-
-function EventRow({ ev }: { ev: SseEvent }) {
-  const COLOR: Record<string, string> = {
-    stage_started: "text-blue-400", stage_completed: "text-green-400",
-    tool_call: "text-purple-400", artifact_written: "text-cyan-400",
-    asset_ready: "text-emerald-400", awaiting_approval: "text-yellow-400",
-    stage_approved: "text-green-400", stage_rejected: "text-orange-400",
-    job_completed: "text-green-400", job_failed: "text-red-400", error: "text-red-400",
-  };
-  const color = COLOR[ev.type] ?? "text-muted-foreground";
-  const ts = new Date(ev.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
-  const label = ev.summary ?? ev.text ?? ev.artifact ?? ev.message ?? ev.type;
-  return (
-    <div className="flex gap-2 items-start">
-      <span className="text-muted-foreground/50 shrink-0">{ts}</span>
-      <span className={`shrink-0 ${color}`}>[{ev.stage ?? ev.type}]</span>
-      <span className="text-foreground/70 break-all">{label}</span>
-    </div>
-  );
-}
