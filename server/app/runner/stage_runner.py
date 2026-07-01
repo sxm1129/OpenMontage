@@ -57,10 +57,41 @@ CINEMATIC_STAGES = [
     {"name": "publish",     "skill": "skills/pipelines/cinematic/publish-director.md",    "approval": False},
 ]
 
+# Explicit overrides / aliases. Anything NOT here is resolved dynamically from
+# the engine's pipeline_defs/<name>.yaml manifest, so every engine pipeline
+# (animated-explainer, screen-demo, podcast-repurpose, …) is runnable via the
+# web platform without hardcoding its stages here.
 PIPELINE_MAP = {
     "cinematic": CINEMATIC_STAGES,
-    "marketing_film": CINEMATIC_STAGES,
+    "marketing_film": CINEMATIC_STAGES,   # alias → cinematic stages
 }
+
+
+def _resolve_stages(pipeline_name: str) -> list[dict]:
+    """Return the stage list for a pipeline.
+
+    Precedence: explicit PIPELINE_MAP override → pipeline_defs manifest →
+    cinematic fallback. Manifest stages map skill "pipelines/x/y-director" to
+    "skills/pipelines/x/y-director.md" and human_approval_default to approval.
+    """
+    if pipeline_name in PIPELINE_MAP:
+        return PIPELINE_MAP[pipeline_name]
+    try:
+        from lib.pipeline_loader import load_pipeline
+        manifest = load_pipeline(pipeline_name)
+        stages = []
+        for s in manifest.get("stages", []):
+            skill = s.get("skill")
+            stages.append({
+                "name": s["name"],
+                "skill": f"skills/{skill}.md" if skill else "",
+                "approval": bool(s.get("human_approval_default", False)),
+            })
+        if stages:
+            return stages
+    except Exception:
+        pass
+    return CINEMATIC_STAGES
 
 MAX_TURNS  = 20
 MAX_ROUNDS = 2   # reviewer sends back at most twice per stage
@@ -298,7 +329,7 @@ async def run_pipeline_job(job_id: str, data: dict) -> None:
 
 async def _run_pipeline_impl(job_id: str, data: dict) -> None:
     pipeline_name = data.get("pipeline", "cinematic")
-    stages = PIPELINE_MAP.get(pipeline_name, CINEMATIC_STAGES)
+    stages = _resolve_stages(pipeline_name)
     brand_info = data.get("brand_info", {})
     options = data.get("options", {})
     project_name = data.get("project_name", job_id)
