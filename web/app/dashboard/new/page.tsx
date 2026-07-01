@@ -10,28 +10,32 @@ import { Separator } from "@/components/ui/separator";
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
+// Friendly Chinese entry points mapped to engine pipelines.
 const CONTENT_TYPES = [
-  {
-    id: "marketing_film",
-    label: "营销宣传片",
-    description: "品牌故事 · 产品发布 · 15-60 秒情感向短片",
-    pipeline: "cinematic",
-    available: true,
-  },
-  { id: "explainer",   label: "解说视频",   description: "动态图文 · 功能演示 · 教程", pipeline: "animated-explainer", available: false },
-  { id: "podcast",     label: "播客剪辑",   description: "长音频 → 短视频精华片段",    pipeline: "podcast-repurpose", available: false },
-  { id: "demo",        label: "产品演示",   description: "屏幕录制 + AI 旁白讲解",     pipeline: "screen-demo",       available: false },
-  { id: "short",       label: "短视频批量", description: "长视频 → 多条竖屏短片",      pipeline: "clip-factory",      available: false },
+  { id: "marketing_film", label: "营销宣传片", description: "品牌故事 · 产品发布 · 15-60 秒情感向短片", pipeline: "cinematic" },
+  { id: "explainer",      label: "解说视频",   description: "动态图文 · 功能演示 · 教程",              pipeline: "animated-explainer" },
+  { id: "podcast",        label: "播客剪辑",   description: "长音频 → 短视频精华片段",                pipeline: "podcast-repurpose" },
+  { id: "demo",           label: "产品演示",   description: "屏幕录制 + AI 旁白讲解",                 pipeline: "screen-demo" },
+  { id: "short",          label: "短视频批量", description: "长视频 → 多条竖屏短片",                  pipeline: "clip-factory" },
 ];
 
+type PipelineInfo = {
+  name: string;
+  description: string;
+  category?: string;
+  stability?: string;
+  stages: string[];
+};
+type PipelineOption = { id: string; label: string; description: string; pipeline: string; stability?: string };
 type BrandKit = { kit_id: string; brand_name: string; slogan: string };
 type Step = "type" | "wizard";
 
 export default function NewProjectPage() {
   const router = useRouter();
   const [step, setStep] = useState<Step>("type");
-  const [selectedType, setSelectedType] = useState<typeof CONTENT_TYPES[0] | null>(null);
+  const [selectedType, setSelectedType] = useState<PipelineOption | null>(null);
   const [brandKits, setBrandKits] = useState<BrandKit[]>([]);
+  const [pipelines, setPipelines] = useState<PipelineInfo[]>([]);
   const [form, setForm] = useState({
     projectName: "",
     brandName: "",
@@ -48,7 +52,16 @@ export default function NewProjectPage() {
       .then((r) => r.json())
       .then((d) => setBrandKits(d.brand_kits ?? []))
       .catch(() => {});
+    fetch(`${SERVER}/pipelines`)
+      .then((r) => r.json())
+      .then((d) => setPipelines(d.pipelines ?? []))
+      .catch(() => {});
   }, []);
+
+  const availableNames = new Set(pipelines.map((p) => p.name));
+  const featuredPipelines = new Set(CONTENT_TYPES.map((c) => c.pipeline));
+  // Engine pipelines that don't have a curated Chinese card — offered directly.
+  const morePipelines = pipelines.filter((p) => !featuredPipelines.has(p.name));
 
   function applyKit(kit: BrandKit) {
     setForm((f) => ({
@@ -104,30 +117,69 @@ export default function NewProjectPage() {
         <h1 className="text-2xl font-bold tracking-tight mb-2">选择视频类型</h1>
         <p className="text-muted-foreground text-sm mb-8">选择要制作的视频类型，AI 会自动选择最合适的生产流程。</p>
         <div className="grid grid-cols-1 gap-3">
-          {CONTENT_TYPES.map((ct) => (
-            <button
-              key={ct.id}
-              disabled={!ct.available}
-              onClick={() => { setSelectedType(ct); setStep("wizard"); }}
-              className={`text-left p-4 rounded-lg border transition-colors ${
-                ct.available
-                  ? "border-border hover:border-foreground/40 hover:bg-accent cursor-pointer"
-                  : "border-border/40 opacity-40 cursor-not-allowed"
-              }`}
-            >
-              <div className="flex items-center gap-3">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-sm">{ct.label}</span>
-                    {!ct.available && <Badge variant="outline" className="text-xs">即将上线</Badge>}
+          {CONTENT_TYPES.map((ct) => {
+            // Available once the engine reports the mapped pipeline (or before
+            // /pipelines has loaded, so the UI isn't empty on first paint).
+            const available = availableNames.size === 0 || availableNames.has(ct.pipeline);
+            return (
+              <button
+                key={ct.id}
+                disabled={!available}
+                onClick={() => { setSelectedType(ct); setStep("wizard"); }}
+                className={`text-left p-4 rounded-lg border transition-colors ${
+                  available
+                    ? "border-border hover:border-foreground/40 hover:bg-accent cursor-pointer"
+                    : "border-border/40 opacity-40 cursor-not-allowed"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm">{ct.label}</span>
+                      {!available && <Badge variant="outline" className="text-xs">未启用</Badge>}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">{ct.description}</p>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-0.5">{ct.description}</p>
+                  {available && <span className="text-muted-foreground text-lg">→</span>}
                 </div>
-                {ct.available && <span className="text-muted-foreground text-lg">→</span>}
-              </div>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
+
+        {morePipelines.length > 0 && (
+          <div className="mt-8">
+            <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+              更多引擎流水线
+            </h2>
+            <div className="grid grid-cols-1 gap-3">
+              {morePipelines.map((p) => (
+                <button
+                  key={p.name}
+                  onClick={() => {
+                    setSelectedType({ id: p.name, label: p.name, description: p.description, pipeline: p.name, stability: p.stability });
+                    setStep("wizard");
+                  }}
+                  className="text-left p-4 rounded-lg border border-border hover:border-foreground/40 hover:bg-accent cursor-pointer transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-medium text-sm font-mono">{p.name}</span>
+                        {p.stability && p.stability !== "production" && (
+                          <Badge variant="outline" className="text-xs">{p.stability}</Badge>
+                        )}
+                        <span className="text-xs text-muted-foreground">{p.stages.length} 阶段</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{p.description}</p>
+                    </div>
+                    <span className="text-muted-foreground text-lg">→</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     );
   }
