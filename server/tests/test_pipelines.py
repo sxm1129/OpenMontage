@@ -47,10 +47,27 @@ def test_pipelines_list_endpoint():
     assert isinstance(sample["stages"], list) and sample["stages"]
 
 
+def test_all_manifests_listed_even_with_schema_drift():
+    # screen-demo / documentary-montage fail strict schema validation; the
+    # lenient loader must still surface them (previously silently dropped, and
+    # selecting them fell back to cinematic).
+    from app.pipeline_catalog import list_manifest_names
+    listed = {p["name"] for p in client.get("/pipelines").json()["pipelines"]}
+    assert listed == set(list_manifest_names())
+    assert {"screen-demo", "documentary-montage"} <= listed
+
+
+def test_drifted_pipeline_resolves_own_stages():
+    sd = [s["name"] for s in _resolve_stages("screen-demo")]
+    assert sd and sd != [s["name"] for s in CINEMATIC_STAGES]
+
+
 def test_pipeline_detail_endpoint_and_404():
     ok = client.get("/pipelines/cinematic")
     assert ok.status_code == 200
     body = ok.json()
     assert body["name"] == "cinematic"
     assert all("name" in s and "approval" in s for s in body["stages"])
+    # a schema-drifted manifest still returns detail (not 400)
+    assert client.get("/pipelines/screen-demo").status_code == 200
     assert client.get("/pipelines/definitely-not-real").status_code == 404

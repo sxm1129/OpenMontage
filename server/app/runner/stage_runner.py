@@ -77,8 +77,8 @@ def _resolve_stages(pipeline_name: str) -> list[dict]:
     if pipeline_name in PIPELINE_MAP:
         return PIPELINE_MAP[pipeline_name]
     try:
-        from lib.pipeline_loader import load_pipeline
-        manifest = load_pipeline(pipeline_name)
+        from app.pipeline_catalog import load_manifest
+        manifest = load_manifest(pipeline_name)
         stages = []
         for s in manifest.get("stages", []):
             skill = s.get("skill")

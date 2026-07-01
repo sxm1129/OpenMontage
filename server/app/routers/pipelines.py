@@ -8,15 +8,12 @@ router = APIRouter()
 @router.get("")
 async def list_pipelines_endpoint():
     """Every pipeline_defs/*.yaml the web platform can run, with UI metadata."""
-    try:
-        from lib.pipeline_loader import list_pipelines, load_pipeline
-    except Exception:
-        return {"pipelines": []}
+    from app.pipeline_catalog import list_manifest_names, load_manifest
 
     out = []
-    for name in sorted(list_pipelines()):
+    for name in list_manifest_names():
         try:
-            m = load_pipeline(name)
+            m = load_manifest(name)
         except Exception:
             continue
         stages = m.get("stages", [])
@@ -33,9 +30,9 @@ async def list_pipelines_endpoint():
 
 @router.get("/{name}")
 async def get_pipeline(name: str):
+    from app.pipeline_catalog import load_manifest
     try:
-        from lib.pipeline_loader import load_pipeline
-        m = load_pipeline(name)
+        m = load_manifest(name)
     except FileNotFoundError:
         raise HTTPException(404, f"Pipeline '{name}' not found")
     except Exception as exc:
