@@ -53,10 +53,20 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
+      # NEXT_PUBLIC_* vars are inlined into the client bundle at `next build`
+      # time, not read at container start — a runtime `environment:` entry
+      # (the old "SERVER_URL=..." here) has no effect on already-built client
+      # JS, and also didn't match the var name every page actually reads
+      # (NEXT_PUBLIC_SERVER_URL). Value must be reachable from the BROWSER,
+      # not from inside the docker network — every fetch in web/app/**/*.tsx
+      # runs client-side, so "http://server:8000" (only resolvable between
+      # containers) would be wrong here even with the right var name; the
+      # server's port is published to the host, so localhost:8000 is what the
+      # browser can actually reach.
+      args:
+        NEXT_PUBLIC_SERVER_URL: http://localhost:8000
     restart: unless-stopped
     env_file: .env
-    environment:
-      - SERVER_URL=http://server:8000
     ports:
       - "3000:3000"
     depends_on:
