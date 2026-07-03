@@ -47,14 +47,14 @@ llm = OpenAI(api_key=MAAS_KEY, base_url=f"{MAAS_BASE}/v1")
 
 # ── Cinematic pipeline stage definitions ─────────────────────────────────────
 CINEMATIC_STAGES = [
-    {"name": "research",    "skill": "skills/pipelines/cinematic/research-director.md",   "approval": False},
-    {"name": "proposal",    "skill": "skills/pipelines/cinematic/proposal-director.md",   "approval": True},
-    {"name": "script",      "skill": "skills/pipelines/cinematic/script-director.md",     "approval": True},
-    {"name": "scene_plan",  "skill": "skills/pipelines/cinematic/scene-director.md",      "approval": False},
-    {"name": "assets",      "skill": "skills/pipelines/cinematic/asset-director.md",      "approval": False},
-    {"name": "edit",        "skill": "skills/pipelines/cinematic/edit-director.md",       "approval": False},
-    {"name": "compose",     "skill": "skills/pipelines/cinematic/compose-director.md",    "approval": False},
-    {"name": "publish",     "skill": "skills/pipelines/cinematic/publish-director.md",    "approval": False},
+    {"name": "research",    "skill": "skills/pipelines/cinematic/research-director.md",   "approval": False, "produces": ["research_brief"]},
+    {"name": "proposal",    "skill": "skills/pipelines/cinematic/proposal-director.md",   "approval": True,  "produces": ["proposal_packet", "decision_log"]},
+    {"name": "script",      "skill": "skills/pipelines/cinematic/script-director.md",     "approval": True,  "produces": ["script"]},
+    {"name": "scene_plan",  "skill": "skills/pipelines/cinematic/scene-director.md",      "approval": False, "produces": ["scene_plan"]},
+    {"name": "assets",      "skill": "skills/pipelines/cinematic/asset-director.md",      "approval": False, "produces": ["asset_manifest"]},
+    {"name": "edit",        "skill": "skills/pipelines/cinematic/edit-director.md",       "approval": False, "produces": ["edit_decisions"]},
+    {"name": "compose",     "skill": "skills/pipelines/cinematic/compose-director.md",    "approval": False, "produces": ["render_report", "final_review"]},
+    {"name": "publish",     "skill": "skills/pipelines/cinematic/publish-director.md",    "approval": False, "produces": ["publish_log"]},
 ]
 
 # Explicit overrides / aliases. Anything NOT here is resolved dynamically from
@@ -90,6 +90,12 @@ def _resolve_stages(pipeline_name: str) -> list[dict]:
                 # read_text(). None makes "no skill" unambiguous.
                 "skill": f"skills/{skill}.md" if skill else None,
                 "approval": bool(s.get("human_approval_default", False)),
+                # The manifest's real output artifact name(s) — most pipelines
+                # name their stage differently from what it produces (stage
+                # "idea" produces "brief"; stage "publish" produces
+                # "publish_log"). Used to tell the agent what to write_artifact
+                # as, and to find the right file for the approval preview.
+                "produces": s.get("produces") or [],
             })
         if stages:
             return stages
@@ -143,6 +149,7 @@ def _run_agent_stage(
     cost_tracker: Any = None,
     budget_cny: float | None = None,
     base_cost: float = 0.0,
+    produces: list[str] | None = None,
 ) -> bool:
     """Run a single stage. Returns True on success, False on failure.
 
@@ -164,6 +171,25 @@ def _run_agent_stage(
 {json.dumps(brand_kit, ensure_ascii=False, indent=2)[:2000]}
 """
 
+    # Tell the agent the manifest's real output name(s) explicitly, rather than
+    # letting it guess from the stage name — many pipelines name a stage
+    # differently from what it produces (stage "idea" produces "brief"; stage
+    # "publish" produces "publish_log"). The approval-preview lookup below
+    # checks these same names, so a mismatch here would show an empty preview
+    # even though the agent's artifact wrote successfully.
+    if produces:
+        primary = produces[0]
+        artifact_hint = (
+            f"## Expected Artifact Name\n"
+            f"Call `write_artifact` with artifact_name=\"{primary}\"."
+            + (f" (Additional artifacts this stage may also produce: {', '.join(produces[1:])}.)" if len(produces) > 1 else "")
+        )
+    else:
+        artifact_hint = (
+            f"## Expected Artifact Name\n"
+            f"No specific name is mandated for this stage — use \"{stage_name}\" for artifact_name."
+        )
+
     user_msg = f"""You are the {stage_name}-director for an OpenMontage cinematic pipeline run.
 
 ## Director Skill
@@ -179,6 +205,8 @@ def _run_agent_stage(
 
 ## User Feedback (if any)
 {feedback or "None — proceed normally."}
+
+{artifact_hint}
 
 ## Your job
 Execute the {stage_name} stage now. Use `read_file` to load additional skills or schemas as needed.
@@ -465,6 +493,7 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                     job_id, stage_name, skill_text, project_dir,
                     brand_info, options, feedback, cost_accumulator, cost_tracker,
                     (None if budget_overridden else budget_cny), base_cost,
+                    stage_def.get("produces"),
                 )
             except BudgetExceededError:
                 _sync_cost(stage_name)
@@ -488,10 +517,18 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         # re-present for approval (previously a rejected artifact silently passed).
         if needs_approval:
             def _preview() -> Any:
+                # The agent's write_artifact call is instructed to use the
+                # manifest's real produces name (see the prompt hint above),
+                # but fall back to trying the stage name itself first — some
+                # skills/older manifests still name the artifact after the
+                # stage. Return the first file that actually exists.
                 arts = _load_artifacts(project_dir)
-                return arts.get(stage_name) or arts.get(
-                    {"proposal": "proposal_packet"}.get(stage_name, stage_name)
-                )
+                if stage_name in arts:
+                    return arts[stage_name]
+                for name in stage_def.get("produces") or []:
+                    if name in arts:
+                        return arts[name]
+                return None
 
             job_store.update(job_id, status="awaiting_approval")
             _emit(job_id, {"type": "awaiting_approval", "stage": stage_name, "preview": _preview()})
@@ -502,12 +539,23 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                 job_store.update(job_id, status="running")
                 _emit(job_id, {"type": "stage_rejected", "stage": stage_name, "feedback": feedback})
                 # Re-run with feedback in a thread (never block the loop) and keep
-                # accumulating cost.
-                success = await asyncio.to_thread(
-                    _run_agent_stage,
-                    job_id, stage_name, skill_text, project_dir,
-                    brand_info, options, feedback, cost_accumulator, cost_tracker,
-                )
+                # accumulating cost. Same budget gate + produces hint as the
+                # first run — previously this call dropped budget_cny/base_cost
+                # entirely, letting a reject-regenerate loop bypass the
+                # pre-call budget ceiling.
+                try:
+                    success = await asyncio.to_thread(
+                        _run_agent_stage,
+                        job_id, stage_name, skill_text, project_dir,
+                        brand_info, options, feedback, cost_accumulator, cost_tracker,
+                        (None if budget_overridden else budget_cny), base_cost,
+                        stage_def.get("produces"),
+                    )
+                except BudgetExceededError:
+                    _sync_cost(stage_name)
+                    if not await _budget_gate(force=True):
+                        return
+                    continue   # approved overspend → re-present the same approval round
                 _sync_cost(stage_name)
                 if not success:
                     job_store.update(job_id, status="failed")

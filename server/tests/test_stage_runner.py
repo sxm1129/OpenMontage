@@ -110,3 +110,38 @@ def test_no_tool_calls_ends_stage(tmp_path, monkeypatch):
     ok = stage_runner._run_agent_stage("job-y", "research", "skill", tmp_path, {}, {})
     assert ok is True
     assert not (tmp_path / "artifacts").exists()  # no tool ran
+
+
+def test_prompt_tells_agent_the_produces_name(tmp_path, monkeypatch):
+    # Regression: stages whose name differs from what they produce (e.g. stage
+    # "idea" produces "brief") used to leave the agent guessing artifact_name
+    # from the stage name alone. The prompt must state the real name(s)
+    # explicitly when the manifest provides a `produces` list.
+    resp = _resp("done", None, "stop")
+    captured = {}
+    def fake_create(**kw):
+        captured["messages"] = kw["messages"]
+        return resp
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    stage_runner._run_agent_stage(
+        "job-z", "idea", "skill", tmp_path, {}, {},
+        produces=["brief", "decision_log"],
+    )
+    user_msg = captured["messages"][0]["content"]
+    assert "Expected Artifact Name" in user_msg
+    assert 'artifact_name="brief"' in user_msg
+    assert "decision_log" in user_msg   # secondary artifact mentioned too
+
+
+def test_prompt_falls_back_to_stage_name_without_produces(tmp_path, monkeypatch):
+    resp = _resp("done", None, "stop")
+    captured = {}
+    def fake_create(**kw):
+        captured["messages"] = kw["messages"]
+        return resp
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    stage_runner._run_agent_stage("job-z2", "custom_stage", "skill", tmp_path, {}, {})
+    user_msg = captured["messages"][0]["content"]
+    assert 'artifact_name="custom_stage"' in user_msg or '"custom_stage"' in user_msg

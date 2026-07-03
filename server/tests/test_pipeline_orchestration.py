@@ -92,6 +92,72 @@ async def test_unhandled_error_marks_failed(runner, monkeypatch):
     assert failed and "Unhandled pipeline error" in failed[0].get("message", "")
 
 
+async def test_approval_preview_uses_produces_name_not_stage_name(runner, monkeypatch):
+    # Regression: many pipelines name a stage differently from what it
+    # produces (e.g. stage "idea" → artifact "brief"). The old preview lookup
+    # only checked stage_name (plus a single "proposal"→"proposal_packet"
+    # alias), so it showed a null preview for every other mismatched stage
+    # even though the agent's artifact wrote successfully.
+    def write_brief(job_id, stage_name, skill_text, project_dir, *a, **k):
+        (project_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+        (project_dir / "artifacts" / "brief.json").write_text('{"hook": "real content"}')
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", write_brief)
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic",
+                        [{"name": "idea", "skill": None, "approval": True, "produces": ["brief"]}])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    async def approver():
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if runner.get("j")["status"] == "awaiting_approval":
+                runner.set_approval("j", "approve", "")
+                return
+    approver_task = asyncio.create_task(approver())
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+    await approver_task
+
+    evs = runner.get_events("j", after_seq=-1)
+    awaiting = next(e for e in evs if e["type"] == "awaiting_approval")
+    assert awaiting["preview"] == {"hook": "real content"}
+
+
+async def test_reject_retry_still_receives_budget_ceiling(runner, monkeypatch):
+    # Regression: the reject-regenerate call to _run_agent_stage used to omit
+    # budget_cny/base_cost entirely, so a reject-loop could keep spending past
+    # the configured ceiling with no pre-call check at all. Assert the
+    # reject-path call receives the same non-None ceiling as the initial run.
+    seen_budget = []
+    def stub(*a, **k):
+        seen_budget.append(a[9])   # budget_cny positional arg
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", stub)
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic",
+                        [{"name": "script", "skill": None, "approval": True, "produces": ["script"]}])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic", "options": {"budget_cny": 50}})
+
+    async def driver():
+        rejected = False
+        for _ in range(300):
+            await asyncio.sleep(0.01)
+            if runner.get("j")["status"] != "awaiting_approval":
+                continue
+            action = "reject" if not rejected else "approve"
+            runner.set_approval("j", action, "try again" if action == "reject" else "")
+            if action == "reject":
+                rejected = True
+            else:
+                return
+    driver_task = asyncio.create_task(driver())
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic",
+                                              "options": {"budget_cny": 50}})
+    await driver_task
+
+    assert seen_budget == [50, 50]     # initial run + reject-retry both saw the real ceiling
+    assert runner.get("j")["status"] == "completed"
+
+
 async def test_budget_gate_pauses_then_resumes_on_approve(runner, monkeypatch):
     # Each stage "spends" 5 CNY against a 1 CNY budget → gate must pause.
     def spend(*a, **k):

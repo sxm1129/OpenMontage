@@ -65,7 +65,11 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "artifact_name": {
                         "type": "string",
-                        "description": "e.g. 'research', 'proposal_packet', 'script', 'scene_plan'"
+                        "description": (
+                            "Use the exact name given under '## Expected Artifact Name' "
+                            "in your stage instructions — it varies per pipeline/stage "
+                            "(e.g. a stage named 'idea' may produce 'brief', not 'idea')."
+                        )
                     },
                     "content": {
                         "type": "object",
