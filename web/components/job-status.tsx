@@ -17,7 +17,30 @@ export type SseEvent = {
   cost_cny?: number;
   budget_cny?: number | null;
   gate?: string;
+  stages?: string[];
 };
+
+// The union of every top-level stage name across all 13 pipeline_defs/*.yaml
+// manifests, plus "budget" (a synthetic pseudo-stage used only for the
+// budget-gate approval event, not a real pipeline stage). Different pipelines
+// use different stage sets — e.g. cinematic has research+proposal, most others
+// collapse both into a single "idea" stage — so this must cover the union, not
+// just cinematic's shape. Extend when a new pipeline introduces a new stage
+// name; STAGE_LABELS lookups always fall back to the raw name (see
+// stageLabel()) so an unmapped name degrades to something readable, never to
+// the literal string "undefined".
+const STAGE_LABELS: Record<string, string> = {
+  research: "调研", proposal: "提案", idea: "创意提案", script: "脚本",
+  scene_plan: "分镜", character_design: "角色设计", rig_plan: "绑定规划",
+  assets: "素材", edit: "剪辑", compose: "合成", publish: "发布",
+  budget: "预算",
+};
+
+/** Stage display label with a safe fallback — never renders "undefined". */
+export function stageLabel(stage: string | null | undefined): string {
+  if (!stage) return "";
+  return STAGE_LABELS[stage] ?? stage;
+}
 
 const STATUS_MAP: Record<string, { label: string; cls: string }> = {
   queued:            { label: "排队中", cls: "bg-muted text-muted-foreground border-border" },

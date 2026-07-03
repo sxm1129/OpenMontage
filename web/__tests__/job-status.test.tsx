@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { StatusBadge, EventRow, eventLabel, type SseEvent } from "@/components/job-status";
+import { StatusBadge, EventRow, eventLabel, stageLabel, type SseEvent } from "@/components/job-status";
 
 function ev(partial: Partial<SseEvent>): SseEvent {
   return { seq: 0, type: "stage_started", ts: 0, ...partial };
@@ -42,6 +42,34 @@ describe("eventLabel precedence", () => {
     expect(eventLabel(ev({ artifact: "A", message: "M" }))).toBe("A");
     expect(eventLabel(ev({ message: "M" }))).toBe("M");
     expect(eventLabel(ev({ type: "job_failed" }))).toBe("job_failed");
+  });
+});
+
+describe("stageLabel", () => {
+  it("maps every stage name used across all pipeline_defs manifests", () => {
+    // The union of top-level stage names across all 13 engine pipelines, plus
+    // the synthetic "budget" gate — see server/app/pipeline_catalog.py.
+    const known = [
+      "research", "proposal", "idea", "script", "scene_plan",
+      "character_design", "rig_plan", "assets", "edit", "compose",
+      "publish", "budget",
+    ];
+    for (const s of known) {
+      const label = stageLabel(s);
+      expect(label).not.toBe("");
+      expect(label).not.toBe("undefined");
+    }
+  });
+
+  it("falls back to the raw name for an unmapped stage — never the literal 'undefined'", () => {
+    // Regression: STAGE_LABELS[awaitingStage] with no fallback used to render
+    // the JS string "undefined" for any pipeline stage outside the hardcoded map.
+    expect(stageLabel("some_future_stage")).toBe("some_future_stage");
+  });
+
+  it("returns an empty string for null/undefined input", () => {
+    expect(stageLabel(null)).toBe("");
+    expect(stageLabel(undefined)).toBe("");
   });
 });
 

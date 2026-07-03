@@ -7,21 +7,20 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
-import { StatusBadge, EventRow, type SseEvent } from "@/components/job-status";
+import { StatusBadge, EventRow, stageLabel, type SseEvent } from "@/components/job-status";
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
-
-const STAGES = ["research", "proposal", "script", "scene_plan", "assets", "edit", "compose", "publish"];
-const STAGE_LABELS: Record<string, string> = {
-  research: "调研", proposal: "提案", script: "脚本",
-  scene_plan: "分镜", assets: "素材", edit: "剪辑",
-  compose: "合成", publish: "发布", budget: "预算",
-};
 
 export default function JobDetailPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const [events, setEvents] = useState<SseEvent[]>([]);
   const [currentStage, setCurrentStage] = useState<string | null>(null);
+  // The pipeline's real, ordered stage list — sent by the backend on
+  // job_started (server/app/runner/stage_runner.py "stages": [...]). Different
+  // pipelines have different stage counts/names (5 for documentary-montage, 9
+  // for screen-demo, etc.), so this must come from the job itself, not a
+  // hardcoded constant shaped after one pipeline.
+  const [stages, setStages] = useState<string[]>([]);
   const [status, setStatus] = useState<string>("queued");
   const [awaitingStage, setAwaitingStage] = useState<string | null>(null);
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
@@ -56,7 +55,11 @@ export default function JobDetailPage() {
         lastSeqRef.current = ev.seq;
         setEvents((prev) => [...prev, ev]);
         if (ev.stage) setCurrentStage(ev.stage);
-        if (ev.type === "job_started" || ev.type === "stage_started") setStatus("running");
+        if (ev.type === "job_started") {
+          setStatus("running");
+          if (ev.stages?.length) setStages(ev.stages);
+        }
+        if (ev.type === "stage_started") setStatus("running");
         if (ev.type === "awaiting_approval") {
           setStatus("awaiting_approval");
           setAwaitingStage(ev.stage ?? null);
@@ -143,8 +146,10 @@ export default function JobDetailPage() {
     }
   }
 
-  const stageIndex = currentStage ? STAGES.indexOf(currentStage) : -1;
-  const progress = stageIndex >= 0 ? Math.round(((stageIndex + 1) / STAGES.length) * 100) : 0;
+  const stageIndex = currentStage ? stages.indexOf(currentStage) : -1;
+  const progress = stageIndex >= 0 && stages.length > 0
+    ? Math.round(((stageIndex + 1) / stages.length) * 100)
+    : 0;
   const isBudgetGate = awaitingStage === "budget";
 
   return (
@@ -173,12 +178,15 @@ export default function JobDetailPage() {
         </div>
       </div>
 
-      {/* Stage Stepper */}
+      {/* Stage Stepper — driven by this job's real, ordered stage list */}
       <Card>
         <CardContent className="pt-6">
           <Progress value={progress} className="mb-4 h-1.5" />
+          {stages.length === 0 ? (
+            <p className="text-xs text-muted-foreground text-center py-2">等待流水线启动…</p>
+          ) : (
           <div className="flex gap-1">
-            {STAGES.map((s, i) => {
+            {stages.map((s, i) => {
               const done = i < stageIndex;
               const active = s === currentStage;
               const waiting = status === "awaiting_approval" && s === awaitingStage;
@@ -193,12 +201,13 @@ export default function JobDetailPage() {
                     {done ? "✓" : waiting ? "!" : i + 1}
                   </div>
                   <span className={`text-[10px] text-center ${active || waiting ? "text-foreground" : "text-muted-foreground"}`}>
-                    {STAGE_LABELS[s]}
+                    {stageLabel(s)}
                   </span>
                 </div>
               );
             })}
           </div>
+          )}
         </CardContent>
       </Card>
 
@@ -226,7 +235,7 @@ export default function JobDetailPage() {
                 <span className="text-yellow-400">⏸</span>
                 {isBudgetGate
                   ? "预算超支 — 需要你确认是否继续"
-                  : `${STAGE_LABELS[awaitingStage]} — 等待你的审批`}
+                  : `${stageLabel(awaitingStage)} — 等待你的审批`}
               </CardTitle>
               {preview && !isBudgetGate && (
                 <Button
