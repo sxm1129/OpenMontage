@@ -1,5 +1,13 @@
 // OpenMontage Web Platform — Prisma Schema
 // DB is metadata/index only. Artifact content lives on disk (projects/).
+//
+// STATUS: scaffolded, not wired in. The running server/web app uses a
+// disk-backed JobStore (server/app/store.py) for all job/event state today —
+// nothing currently reads or writes through this schema. It exists ahead of
+// a future multi-tenant/OAuth milestone (see below) so that migration won't
+// require a schema redesign later. Safe to ignore for local dev; the
+// docker-compose `postgres` service can be removed if you don't plan to wire
+// this up soon.
 
 generator client {
   provider = "prisma-client-js"

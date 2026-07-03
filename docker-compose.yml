@@ -1,5 +1,9 @@
 services:
 
+  # NOT CURRENTLY USED by the server or web app — both run on the disk-backed
+  # JobStore (server/app/store.py) and the Prisma schema (web/prisma/schema.
+  # prisma) it would back. Scaffolded ahead of a future multi-tenant/OAuth
+  # milestone; remove this service if you're not planning that soon.
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
