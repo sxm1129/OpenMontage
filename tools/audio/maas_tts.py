@@ -4,11 +4,11 @@ POST /v1/audio/speech  — OpenAI-compatible TTS endpoint.
 Gateway handles all provider differences; client always sends the same shape.
 
 Models available (2026-06-28):
-  h100/indextts       — Self-hosted IndexTTS on H100, Chinese+English, free
+  leapfast/indextts       — Self-hosted IndexTTS on H100, Chinese+English, free
   cosyvoice-v3.5-flash — DashScope CosyVoice, Chinese multi-speaker, free
   qwen3-tts-flash     — DashScope Qwen3 TTS, ¥1.60/M tokens
 
-Voice map for h100/indextts (OpenAI names work too):
+Voice map for leapfast/indextts (OpenAI names work too):
   alloy   → zh_female_intellectual   (知性女声)
   echo    → zh_male_broadcaster      (播音男声)
   fable   → zh_female_youthful       (青春女声)
@@ -71,7 +71,7 @@ class MaasTTS(BaseTool):
     best_for = [
         "Chinese narration — IndexTTS H100 is optimized for Mandarin",
         "internal MaaS quota — no external TTS billing",
-        "fast synthesis: h100/indextts and cosyvoice-v3.5-flash are free-tier",
+        "fast synthesis: leapfast/indextts and cosyvoice-v3.5-flash are free-tier",
     ]
     not_good_for = [
         "voice cloning",
@@ -81,11 +81,11 @@ class MaasTTS(BaseTool):
 
     # TTS models on MaaS (sourced 2026-06-28)
     MODELS = {
-        "h100/indextts":        {"lang": "zh+en", "price": "free",           "format": "wav"},
+        "leapfast/indextts":        {"lang": "zh+en", "price": "free",           "format": "wav"},
         "cosyvoice-v3.5-flash": {"lang": "zh",    "price": "free",           "format": "mp3"},
         "qwen3-tts-flash":      {"lang": "zh+en", "price": "¥1.60/M tokens", "format": "mp3"},
     }
-    DEFAULT_MODEL = "h100/indextts"
+    DEFAULT_MODEL = "leapfast/indextts"
 
     # OpenAI voice → IndexTTS native voice index
     VOICE_MAP = {
@@ -106,10 +106,10 @@ class MaasTTS(BaseTool):
             "model": {
                 "type": "string",
                 "description": (
-                    "TTS model. Options: h100/indextts (default, free, zh+en), "
+                    "TTS model. Options: leapfast/indextts (default, free, zh+en), "
                     "cosyvoice-v3.5-flash (free, zh), qwen3-tts-flash (¥1.60/M tok, zh+en)"
                 ),
-                "default": "h100/indextts",
+                "default": "leapfast/indextts",
             },
             "voice": {
                 "type": "string",
@@ -123,7 +123,7 @@ class MaasTTS(BaseTool):
                 "type": "string",
                 "enum": ["mp3", "wav"],
                 "default": "mp3",
-                "description": "Output audio format (h100/indextts defaults to wav)",
+                "description": "Output audio format (leapfast/indextts defaults to wav)",
             },
             "speed": {
                 "type": "number",
@@ -152,7 +152,7 @@ class MaasTTS(BaseTool):
         return ToolStatus.AVAILABLE if self._api_key() else ToolStatus.UNAVAILABLE
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
-        # h100/indextts and cosyvoice are free; qwen3-tts-flash is token-priced in CNY
+        # leapfast/indextts and cosyvoice are free; qwen3-tts-flash is token-priced in CNY
         return 0.0
 
     def estimate_runtime(self, inputs: dict[str, Any]) -> float:
@@ -174,8 +174,8 @@ class MaasTTS(BaseTool):
         fmt = inputs.get("format", "mp3")
         text = inputs["text"]
 
-        # h100/indextts native format is WAV; honour caller's preference otherwise
-        if model == "h100/indextts" and fmt == "mp3":
+        # leapfast/indextts native format is WAV; honour caller's preference otherwise
+        if model == "leapfast/indextts" and fmt == "mp3":
             fmt = "wav"
 
         payload: dict[str, Any] = {

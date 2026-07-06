@@ -104,7 +104,7 @@ class MaasVideo(BaseTool):
         "happyhorse-1.0-r2v":                    {"ops": ["r2v"],        "price_720p": 1.17, "price_1080p": 2.08},
         "happyhorse-1.0-video-edit":             {"ops": ["video_edit"], "price_720p": 1.17, "price_1080p": 2.08},
         # ── H100 Self-hosted GPU Cluster ─────────────────────────────────────
-        "h100/ltx-2.3":                          {"ops": ["t2v"],        "price_480p": 0.50, "price_720p": 0.70},
+        "leapfast/ltx-2.3":                          {"ops": ["t2v"],        "price_480p": 0.50, "price_720p": 0.70},
     }
     DEFAULT_MODEL = "volcengine/doubao-seedance-2.0"
 
@@ -120,7 +120,7 @@ class MaasVideo(BaseTool):
                     "T2V: volcengine/doubao-seedance-2.0 (default), volcengine/doubao-seedance-2.0-fast, "
                     "volcengine/doubao-seedance-1.5-pro, volcengine/doubao-seedance-1.0-pro, "
                     "volcengine/doubao-seedance-1.0-pro-fast, fanya/seedance2.0, "
-                    "wanx2.1-t2v-plus, wanx2.1-t2v-turbo, happyhorse-1.0-t2v, h100/ltx-2.3\n"
+                    "wanx2.1-t2v-plus, wanx2.1-t2v-turbo, happyhorse-1.0-t2v, leapfast/ltx-2.3\n"
                     "I2V: wan2.7-i2v, wanx2.1-i2v-plus, happyhorse-1.0-i2v\n"
                     "R2V: happyhorse-1.0-r2v\n"
                     "Edit: wan2.7-videoedit, happyhorse-1.0-video-edit"

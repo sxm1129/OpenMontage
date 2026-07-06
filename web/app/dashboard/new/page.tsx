@@ -76,8 +76,8 @@ export default function NewProjectPage() {
         },
         options: {
           duration_seconds: parseInt(form.duration),
-          video_model: "h100/ltx-2.3",
-          image_model: "h100/flux2",
+          video_model: "leapfast/ltx-2.3",
+          image_model: "leapfast/flux2",
           tts_model: "qwen3-tts-flash",
           ...(form.brandKitId ? { brand_kit_id: form.brandKitId } : {}),
           ...(form.budgetCny && Number(form.budgetCny) > 0

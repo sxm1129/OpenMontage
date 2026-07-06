@@ -1,7 +1,7 @@
 """DolphinLitePark MaaS platform image generation tool.
 
 Calls POST /v1/images/generations (OpenAI-compatible, synchronous).
-Primary model: h100/flux2 — self-hosted FLUX.1 on the H100 GPU cluster.
+Primary model: leapfast/flux2 — self-hosted FLUX.1 on the H100 GPU cluster.
 
 Gateway base URL: https://api.aiapbot.com (override via MAAS_API_BASE)
 Auth:            Authorization: Bearer <MAAS_API_KEY>
@@ -57,7 +57,7 @@ class MaasImage(BaseTool):
     }
     best_for = [
         "internal MaaS quota — no external billing",
-        "h100/flux2: self-hosted FLUX.1 on H100 GPU, photorealistic quality",
+        "leapfast/flux2: self-hosted FLUX.1 on H100 GPU, photorealistic quality",
         "fast iteration without consuming external API credits",
     ]
     not_good_for = [
@@ -68,9 +68,9 @@ class MaasImage(BaseTool):
 
     # Models available for image generation on the MaaS platform
     MODELS = {
-        "h100/flux2": {"desc": "Self-hosted FLUX.1 on H100 cluster, photorealistic"},
+        "leapfast/flux2": {"desc": "Self-hosted FLUX.1 on H100 cluster, photorealistic"},
     }
-    DEFAULT_MODEL = "h100/flux2"
+    DEFAULT_MODEL = "leapfast/flux2"
 
     input_schema = {
         "type": "object",
@@ -79,8 +79,8 @@ class MaasImage(BaseTool):
             "prompt": {"type": "string", "description": "Image generation prompt"},
             "model": {
                 "type": "string",
-                "description": "Gateway model ID. Currently: h100/flux2",
-                "default": "h100/flux2",
+                "description": "Gateway model ID. Currently: leapfast/flux2",
+                "default": "leapfast/flux2",
             },
             "size": {
                 "type": "string",
