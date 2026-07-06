@@ -163,6 +163,36 @@ async def test_stage_stopping_without_producing_artifact_fails_not_completes(run
     assert failed and "scene_plan" in failed[0]["message"]
 
 
+async def test_partial_produces_fails_not_just_any_of_them(runner, monkeypatch, tmp_path):
+    # Found live: compose declares produces=[render_report, final_review] and
+    # publish's required_artifacts_in names final_review specifically. An agent
+    # run that writes render_report but stops before writing final_review must
+    # fail AT compose (with a message naming final_review) — not be treated as
+    # "done enough" because at least one produces name exists, which would
+    # cascade the failure one stage further downstream to publish with a more
+    # confusing message and a wasted round-trip.
+    def write_only_render_report(job_id, stage_name, skill_text, project_dir, *a, **k):
+        (project_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+        (project_dir / "artifacts" / "render_report.json").write_text("{}")
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", write_only_render_report)
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic", [
+        {"name": "compose", "skill": None, "approval": False,
+         "produces": ["render_report", "final_review"]},
+    ])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    job = runner.get("j")
+    assert job["status"] == "failed"
+    assert "compose" not in job["completed_stages"]
+    failed = [e for e in runner.get_events("j", after_seq=-1) if e["type"] == "job_failed"]
+    assert failed and "final_review" in failed[0]["message"]
+    # the artifact that WAS written must not appear in the missing list
+    assert "'render_report'" not in failed[0]["message"]
+
+
 async def test_approval_preview_uses_produces_name_not_stage_name(runner, monkeypatch):
     # Regression: many pipelines name a stage differently from what it
     # produces (e.g. stage "idea" → artifact "brief"). The old preview lookup
