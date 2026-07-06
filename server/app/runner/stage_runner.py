@@ -615,6 +615,17 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
 
         _emit(job_id, {"type": "stage_completed", "stage": stage_name})
 
+        # Interim preview: the compose stage produces the actual rendered
+        # video, but publish (packaging/distribution metadata) still has to
+        # run before the job is "completed" — that's several more turns the
+        # user would otherwise wait through with no way to see the render
+        # they're actually waiting on. Surface it as soon as it exists.
+        if stage_name == "compose":
+            preview_url = _discover_render_url(project_dir, project_name)
+            if preview_url:
+                job_store.update(job_id, preview_render_url=preview_url)
+                _emit(job_id, {"type": "preview_ready", "render_url": preview_url})
+
         # Human approval gate — loop so repeated rejections each regenerate AND
         # re-present for approval (previously a rejected artifact silently passed).
         if needs_approval:

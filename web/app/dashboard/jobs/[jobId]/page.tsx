@@ -13,6 +13,7 @@ const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
 export default function JobDetailPage() {
   const { jobId } = useParams<{ jobId: string }>();
+  const [projectName, setProjectName] = useState<string | null>(null);
   const [events, setEvents] = useState<SseEvent[]>([]);
   const [currentStage, setCurrentStage] = useState<string | null>(null);
   // The pipeline's real, ordered stage list — sent by the backend on
@@ -25,6 +26,10 @@ export default function JobDetailPage() {
   const [awaitingStage, setAwaitingStage] = useState<string | null>(null);
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [renderUrl, setRenderUrl] = useState<string | null>(null);
+  // Interim preview: the compose stage's own render, playable as soon as it's
+  // produced — well before publish (packaging/distribution metadata) finishes.
+  // Distinct from renderUrl, which is only set once the whole job completes.
+  const [previewRenderUrl, setPreviewRenderUrl] = useState<string | null>(null);
   const [costCny, setCostCny] = useState<number>(0);
   const [budgetCny, setBudgetCny] = useState<number | null>(null);
 
@@ -44,6 +49,21 @@ export default function JobDetailPage() {
   const lastSeqRef = useRef(-1);
   const doneRef = useRef(false);        // job reached a terminal state
   const cancelledRef = useRef(false);   // component unmounted — stop reconnecting
+
+  // Seed real state on mount via REST — the SSE stream alone only carries
+  // events from lastEventId onward; the page title (and cost/status on a
+  // fresh load) shouldn't have to wait for the full event replay to resolve.
+  useEffect(() => {
+    fetch(`${SERVER}/jobs/${jobId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((job) => {
+        if (!job) return;
+        if (job.project_name) setProjectName(job.project_name);
+        if (job.render_url) setRenderUrl(job.render_url);
+        if (job.preview_render_url) setPreviewRenderUrl(job.preview_render_url);
+      })
+      .catch(() => {});
+  }, [jobId]);
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -78,6 +98,9 @@ export default function JobDetailPage() {
         if (ev.type === "cost_updated" && ev.cost_cny != null) {
           setCostCny(ev.cost_cny);
           if (ev.budget_cny != null) setBudgetCny(ev.budget_cny);
+        }
+        if (ev.type === "preview_ready") {
+          setPreviewRenderUrl(ev.render_url ?? null);
         }
         if (ev.type === "job_completed") {
           setStatus("completed");
@@ -173,8 +196,8 @@ export default function JobDetailPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold tracking-tight">{jobId}</h1>
-          <p className="text-muted-foreground text-sm mt-0.5">Job ID: {jobId}</p>
+          <h1 className="text-xl font-bold tracking-tight">{projectName ?? "加载中…"}</h1>
+          <p className="text-muted-foreground text-sm mt-0.5 font-mono">{jobId}</p>
         </div>
         <div className="flex items-center gap-3">
           {(costCny > 0 || budgetCny != null) && (
@@ -328,6 +351,22 @@ export default function JobDetailPage() {
                 </Button>
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Interim preview — the compose stage's own render, playable as soon as
+          it exists, well before publish (packaging/distribution metadata)
+          finishes. Hidden once the job fully completes (the final card below
+          takes over). */}
+      {previewRenderUrl && !renderUrl && (
+        <Card className="border-blue-500/40 bg-blue-500/5">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base text-blue-400">👁 合成预览（尚未发布）</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            <video src={previewRenderUrl} controls className="w-full rounded-lg bg-black aspect-video" />
+            <p className="text-xs text-muted-foreground">合成阶段已产出，后续阶段可能还会调整</p>
           </CardContent>
         </Card>
       )}

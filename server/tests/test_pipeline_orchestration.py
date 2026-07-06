@@ -193,6 +193,39 @@ async def test_stage_stopping_without_producing_artifact_fails_not_completes(run
     assert failed and "scene_plan" in failed[0]["message"]
 
 
+async def test_compose_preview_ready_before_job_completes(runner, monkeypatch, tmp_path):
+    # The compose stage's render is the actual deliverable, but publish
+    # (packaging/distribution metadata) still has to run before the job is
+    # "completed" — several more turns the user would otherwise wait through
+    # with no way to see the render they're actually waiting on. A
+    # preview_ready event (carrying the same render it'll serve as the final
+    # one) must fire as soon as compose finishes, well before job_completed.
+    def write_stage_output(job_id, stage_name, skill_text, project_dir, *a, **k):
+        if stage_name == "compose":
+            (project_dir / "renders").mkdir(parents=True, exist_ok=True)
+            (project_dir / "renders" / "final.mp4").write_bytes(b"x")
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", write_stage_output)
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic", [
+        {"name": "research", "skill": None, "approval": False},
+        {"name": "compose", "skill": None, "approval": False},
+        {"name": "publish", "skill": None, "approval": False},
+    ])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    evs = runner.get_events("j", after_seq=-1)
+    types = [e["type"] for e in evs]
+    preview_idx = types.index("preview_ready")
+    completed_idx = types.index("job_completed")
+    assert preview_idx < completed_idx   # surfaced well before the job finished
+    assert evs[preview_idx]["render_url"] == "/media/p/renders/final.mp4"
+    # Persisted on the job record too — so a page load/refresh mid-publish
+    # (before job_completed) can still show it via the initial REST fetch.
+    assert runner.get("j")["preview_render_url"] == "/media/p/renders/final.mp4"
+
+
 async def test_partial_produces_fails_not_just_any_of_them(runner, monkeypatch, tmp_path):
     # Found live: compose declares produces=[render_report, final_review] and
     # publish's required_artifacts_in names final_review specifically. An agent
