@@ -112,6 +112,42 @@ def test_no_tool_calls_ends_stage(tmp_path, monkeypatch):
     assert not (tmp_path / "artifacts").exists()  # no tool ran
 
 
+def test_tool_keyerror_reports_missing_parameter_not_bare_repr(tmp_path, monkeypatch):
+    # Regression: a tool indexing inputs["some_field"] with no fallback raises
+    # a bare KeyError, which str()s to just "'some_field'" — cryptic enough
+    # that the agent can't tell what to fix and repeats the same broken call
+    # until the stage burns through MAX_TURNS (this exact pattern hit
+    # video_compose's "operation" key live). The message fed back to the
+    # agent must name the parameter explicitly so it can self-correct.
+    turn1 = _resp(
+        "composing",
+        [_tool_call("c1", "run_openmontage_tool",
+                    '{"tool_name": "video_compose", "inputs": {}}')],
+        "stop",
+    )
+    turn2 = _resp("done", None, "stop")
+    responses = iter([turn1, turn2])
+    monkeypatch.setattr(
+        stage_runner, "execute_tool",
+        lambda *a, **k: (_ for _ in ()).throw(KeyError("operation")),
+    )
+
+    captured = {}
+    def fake_create(**kw):
+        captured["messages"] = kw["messages"]
+        return next(responses)
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    stage_runner._run_agent_stage("job-w", "compose", "skill", tmp_path, {}, {})
+
+    tool_result_msgs = [m["content"] for m in captured["messages"] if m.get("role") == "tool"]
+    assert tool_result_msgs, "expected a tool-role message with the error"
+    assert "missing required parameter" in tool_result_msgs[0].lower()
+    assert "operation" in tool_result_msgs[0]
+    # The bare, uninterpretable KeyError repr must NOT be the whole message.
+    assert tool_result_msgs[0] != "ERROR: Tool execution failed: 'operation'"
+
+
 def test_prompt_tells_agent_the_produces_name(tmp_path, monkeypatch):
     # Regression: stages whose name differs from what they produce (e.g. stage
     # "idea" produces "brief") used to leave the agent guessing artifact_name

@@ -349,7 +349,17 @@ After writing the artifact, confirm briefly what you produced.
                 # can pause for the human budget decision.
                 raise
             except Exception as exc:
-                result = f"ERROR: Tool execution failed: {exc}"
+                # A bare KeyError (e.g. a tool indexing inputs["some_field"]
+                # with no .get() fallback) stringifies to just "'some_field'"
+                # — cryptic enough that the agent can't tell what to fix and
+                # ends up repeating the exact same broken call until the stage
+                # burns through MAX_TURNS. Name the parameter explicitly so
+                # the agent can self-correct on the next turn instead of
+                # looping on an error it can't interpret.
+                if isinstance(exc, KeyError):
+                    result = f"ERROR: Tool execution failed — missing required parameter: {exc}"
+                else:
+                    result = f"ERROR: Tool execution failed: {exc}"
                 _emit(job_id, {
                     "type": "error",
                     "stage": stage_name,
