@@ -136,6 +136,33 @@ async def test_required_artifact_present_proceeds(runner, monkeypatch, tmp_path)
     assert runner.get("j")["status"] == "completed"
 
 
+async def test_stage_stopping_without_producing_artifact_fails_not_completes(runner, monkeypatch):
+    # Regression: _run_agent_stage returning True only means the agent's LLM
+    # loop ended with no further tool calls — e.g. it stopped to ask a human
+    # instead of silently substituting a fallback provider (the correct
+    # behavior when a generation tool fails, per the provider skill contract).
+    # That was being treated as unconditional stage success: the stage got
+    # added to completed_stages and PERMANENTLY skipped on every future
+    # retry — retry could never re-run the one stage that actually needed it,
+    # a dead end. The job must instead fail at the stage that stalled, and
+    # NOT record it as completed, so a retry actually re-attempts it.
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", lambda *a, **k: True)  # never writes anything
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic", [
+        {"name": "scene_plan", "skill": None, "approval": False, "produces": ["scene_plan"]},
+        {"name": "assets", "skill": None, "approval": False, "produces": ["asset_manifest"]},
+    ])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    job = runner.get("j")
+    assert job["status"] == "failed"
+    assert job["current_stage"] == "scene_plan"        # fails at the FIRST stage that stalls
+    assert "scene_plan" not in job["completed_stages"]  # NOT recorded — retry can re-attempt it
+    failed = [e for e in runner.get_events("j", after_seq=-1) if e["type"] == "job_failed"]
+    assert failed and "scene_plan" in failed[0]["message"]
+
+
 async def test_approval_preview_uses_produces_name_not_stage_name(runner, monkeypatch):
     # Regression: many pipelines name a stage differently from what it
     # produces (e.g. stage "idea" → artifact "brief"). The old preview lookup
@@ -174,6 +201,11 @@ async def test_reject_retry_still_receives_budget_ceiling(runner, monkeypatch):
     seen_budget = []
     def stub(*a, **k):
         seen_budget.append(a[9])   # budget_cny positional arg
+        # Simulate a real stage: write the declared produces artifact so the
+        # post-success "did this stage actually produce anything" check passes.
+        project_dir = a[3]
+        (project_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+        (project_dir / "artifacts" / "script.json").write_text("{}")
         return True
     monkeypatch.setattr(stage_runner, "_run_agent_stage", stub)
     monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic",

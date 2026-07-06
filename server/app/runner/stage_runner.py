@@ -130,6 +130,30 @@ def _load_artifacts(project_dir: Path) -> dict[str, Any]:
     return artifacts
 
 
+def _missing_produces(project_dir: Path, stage_def: dict) -> list[str] | None:
+    """Return the stage's declared `produces` names if NONE of them were
+    actually written, else None (stage genuinely produced something).
+
+    _run_agent_stage returning True only means the agent's LLM loop ended
+    without further tool calls — e.g. it decided to stop and ask a human
+    instead of silently substituting a fallback provider (the correct
+    behavior per the tool-provider skill contract). Without this check that
+    "no more tool calls" was being treated as unconditional success: the stage
+    got recorded in completed_stages, permanently skipped on every future
+    retry, and the job died one stage later at the FIRST stage that actually
+    checks required_artifacts_in — a confusing message pointing at the wrong
+    stage, and a dead-end retry loop (retry can never re-run the stage that
+    really needs it).
+    """
+    produces = stage_def.get("produces") or []
+    if not produces:
+        return None
+    have = set(_load_artifacts(project_dir))
+    if any(name in have for name in produces):
+        return None
+    return produces
+
+
 def _load_brand_kit(kit_id: str | None) -> dict:
     """Load a brand kit from brand_kits/<kit_id>/kit.json, or empty dict."""
     if not kit_id:
@@ -537,6 +561,21 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         if not success:
             job_store.update(job_id, status="failed", current_stage=stage_name)
             _emit(job_id, {"type": "job_failed", "stage": stage_name})
+            return
+
+        missing = _missing_produces(project_dir, stage_def)
+        if missing is not None:
+            job_store.update(job_id, status="failed", current_stage=stage_name)
+            _emit(job_id, {
+                "type": "job_failed",
+                "stage": stage_name,
+                "message": (
+                    f"Stage '{stage_name}' finished without writing any of its required "
+                    f"artifact(s) {missing} — check the event log above; the agent may "
+                    f"have stopped to ask for a decision (e.g. a generation provider "
+                    f"failure) instead of completing. Retry will re-run this stage."
+                ),
+            })
             return
 
         _emit(job_id, {"type": "stage_completed", "stage": stage_name})
