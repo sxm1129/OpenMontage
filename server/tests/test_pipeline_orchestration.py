@@ -7,6 +7,7 @@ runner's control flow — the area where most of this session's fixes landed.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -134,6 +135,35 @@ async def test_required_artifact_present_proceeds(runner, monkeypatch, tmp_path)
     await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
 
     assert runner.get("j")["status"] == "completed"
+
+
+async def test_concurrent_run_for_same_job_id_is_a_noop(runner, monkeypatch):
+    # Regression: two overlapping run_pipeline_job calls for the same job_id
+    # (e.g. a retry racing an already-live run) used to both drive the
+    # pipeline concurrently — two LLM sessions writing artifacts for the same
+    # project, clobbering each other. The in-process _ACTIVE_JOB_IDS guard
+    # must make the second call an immediate no-op.
+    calls = []
+    def slow_stage(*a, **k):
+        calls.append(1)
+        time.sleep(0.05)   # runs inside asyncio.to_thread — a real sleep is fine here
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", slow_stage)
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    first = asyncio.create_task(
+        stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+    )
+    await asyncio.sleep(0.01)   # let the first call register itself as active
+    # Second call for the SAME job_id while the first is still in flight.
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+    await first
+
+    events = runner.get_events("j", after_seq=-1)
+    dup_ignored = [e for e in events if "duplicate run_pipeline_job" in e.get("message", "")]
+    assert len(dup_ignored) == 1
+    assert runner.get("j")["status"] == "completed"
+    assert "j" not in stage_runner._ACTIVE_JOB_IDS   # cleaned up after completion
 
 
 async def test_stage_stopping_without_producing_artifact_fails_not_completes(runner, monkeypatch):

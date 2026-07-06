@@ -84,12 +84,22 @@ async def save_artifact(job_id: str, req: SaveArtifactRequest):
 
 @router.post("/{job_id}/retry")
 async def retry_job(job_id: str):
-    """Re-run a failed (or stuck) job — resumes from completed_stages."""
+    """Re-run a failed job — resumes from completed_stages.
+
+    Only "failed" is retryable. A live "running" job must NEVER be retried:
+    the persistence layer already flips any job that was mid-flight when the
+    process died to "failed" on startup (JobStore._load_all), so a genuinely
+    orphaned job always shows up as "failed", never stuck at "running". Prior
+    to this fix "running" was also accepted (meant for that orphaned case),
+    but that let a still-live job be retried too — enqueuing a SECOND
+    concurrent run_pipeline_job for the same job_id, racing the first one and
+    corrupting whichever artifact each happened to write last.
+    """
     job = job_store.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    if job.get("status") not in ("failed", "running"):
-        raise HTTPException(400, "Only failed or stuck jobs can be retried")
+    if job.get("status") != "failed":
+        raise HTTPException(400, "Only failed jobs can be retried")
     job_store.update(job_id, status="queued")
     get_job_queue().enqueue(run_pipeline_job, job_id, {
         "project_name": job.get("project_name", job_id),

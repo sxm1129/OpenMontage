@@ -73,7 +73,7 @@ def test_job_create_list_get(client):
     assert client.get("/jobs/does-not-exist").status_code == 404
 
 
-def test_retry_requires_failed_or_running(client):
+def test_retry_requires_failed(client):
     jid = client.post("/jobs", json=_new_job_body()).json()["job_id"]
     # freshly queued → cannot retry
     assert client.post(f"/jobs/{jid}/retry").status_code == 400
@@ -83,6 +83,18 @@ def test_retry_requires_failed_or_running(client):
     assert r.status_code == 200
     assert r.json()["status"] == "queued"
     assert client.post("/jobs/nope/retry").status_code == 404
+
+
+def test_retry_rejects_a_live_running_job(client):
+    # Regression: "running" used to be accepted too (meant for a job orphaned
+    # by a crash), but a genuinely orphaned job is always flipped to "failed"
+    # by JobStore._load_all on startup — so "running" only ever means a job is
+    # actually, currently being driven. Retrying it would enqueue a SECOND
+    # concurrent run_pipeline_job for the same job_id, racing the live one.
+    jid = client.post("/jobs", json=_new_job_body()).json()["job_id"]
+    jobs.job_store.update(jid, status="running")
+    r = client.post(f"/jobs/{jid}/retry")
+    assert r.status_code == 400
 
 
 def test_approve_requires_awaiting(client):

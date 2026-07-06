@@ -376,12 +376,30 @@ After writing the artifact, confirm briefly what you produced.
     return False
 
 
+# In-process re-entrancy guard: job_ids with a run_pipeline_job currently
+# in flight. The /retry endpoint already rejects retrying a non-"failed" job,
+# but that check and the enqueue aren't atomic — two near-simultaneous retry
+# calls (or a retry racing a job's own natural completion) could both pass the
+# status check before either updates it. A second concurrent run for the same
+# job_id would race the first: two LLM sessions writing artifacts for the same
+# project, each clobbering whatever the other just wrote. This set makes a
+# duplicate invocation a fast no-op instead of a silent data race.
+_ACTIVE_JOB_IDS: set[str] = set()
+
+
 async def run_pipeline_job(job_id: str, data: dict) -> None:
     """Async entry point called by FastAPI BackgroundTasks.
 
     Wrapped in a last-resort guard so any unhandled error marks the job failed
     and surfaces via SSE, instead of leaving it silently stuck at 'running'.
     """
+    if job_id in _ACTIVE_JOB_IDS:
+        _emit(job_id, {
+            "type": "error",
+            "message": "Ignored a duplicate run_pipeline_job call — this job is already running.",
+        })
+        return
+    _ACTIVE_JOB_IDS.add(job_id)
     try:
         await _run_pipeline_impl(job_id, data)
     except Exception as exc:  # noqa: BLE001 — deliberate catch-all backstop
@@ -392,6 +410,8 @@ async def run_pipeline_job(job_id: str, data: dict) -> None:
             "message": f"Unhandled pipeline error: {exc}",
             "trace": traceback.format_exc()[-1500:],
         })
+    finally:
+        _ACTIVE_JOB_IDS.discard(job_id)
 
 
 async def _run_pipeline_impl(job_id: str, data: dict) -> None:
