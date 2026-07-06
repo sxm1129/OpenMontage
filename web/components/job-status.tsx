@@ -63,6 +63,22 @@ export function eventLabel(ev: SseEvent): string {
   return ev.summary ?? ev.text ?? ev.artifact ?? ev.message ?? ev.type;
 }
 
+/**
+ * The backend returns render/preview URLs as root-relative paths
+ * ("/media/...") meant for ITS OWN origin (the FastAPI server's static
+ * mount). A bare <video src="/media/...">  resolves against the CURRENT
+ * page's origin instead — the Next.js dev server, on a different port/host
+ * — which 404s and the video silently fails to load (confirmed live:
+ * readyState 0, networkState NETWORK_NO_SOURCE, no visible error to the
+ * user beyond a blank player). Root-relative media paths must be resolved
+ * against the backend origin explicitly.
+ */
+export function mediaUrl(serverBase: string, path: string | null | undefined): string | null {
+  if (!path) return null;
+  if (/^https?:\/\//i.test(path)) return path;   // already absolute
+  return `${serverBase}${path.startsWith("/") ? "" : "/"}${path}`;
+}
+
 export function StatusBadge({ status }: { status: string }) {
   const s = STATUS_MAP[status] ?? STATUS_MAP.queued;
   return (

@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
-import { StatusBadge, EventRow, stageLabel, type SseEvent } from "@/components/job-status";
+import { StatusBadge, EventRow, stageLabel, mediaUrl, type SseEvent } from "@/components/job-status";
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
@@ -365,7 +365,7 @@ export default function JobDetailPage() {
             <CardTitle className="text-base text-blue-400">👁 合成预览（尚未发布）</CardTitle>
           </CardHeader>
           <CardContent className="space-y-1">
-            <video src={previewRenderUrl} controls className="w-full rounded-lg bg-black aspect-video" />
+            <video src={mediaUrl(SERVER, previewRenderUrl) ?? undefined} controls className="w-full rounded-lg bg-black aspect-video" />
             <p className="text-xs text-muted-foreground">合成阶段已产出，后续阶段可能还会调整</p>
           </CardContent>
         </Card>
@@ -378,8 +378,8 @@ export default function JobDetailPage() {
             <CardTitle className="text-base text-green-400">🎬 成片已就绪</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <video src={renderUrl} controls className="w-full rounded-lg bg-black aspect-video" />
-            <a href={renderUrl} download>
+            <video src={mediaUrl(SERVER, renderUrl) ?? undefined} controls className="w-full rounded-lg bg-black aspect-video" />
+            <a href={mediaUrl(SERVER, renderUrl) ?? undefined} download>
               <Button variant="outline" className="w-full">下载 MP4</Button>
             </a>
           </CardContent>

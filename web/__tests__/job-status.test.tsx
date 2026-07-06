@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { StatusBadge, EventRow, eventLabel, stageLabel, type SseEvent } from "@/components/job-status";
+import { StatusBadge, EventRow, eventLabel, stageLabel, mediaUrl, type SseEvent } from "@/components/job-status";
 
 function ev(partial: Partial<SseEvent>): SseEvent {
   return { seq: 0, type: "stage_started", ts: 0, ...partial };
@@ -83,5 +83,36 @@ describe("EventRow", () => {
   it("falls back to type for the tag when no stage is present", () => {
     render(<EventRow ev={ev({ type: "job_completed", stage: undefined, message: "done" })} />);
     expect(screen.getByText("[job_completed]")).toBeInTheDocument();
+  });
+});
+
+describe("mediaUrl", () => {
+  // Regression: found live — a bare <video src="/media/..."> resolves
+  // against the CURRENT page's origin (the Next.js dev server), not the
+  // backend's, since the backend returns root-relative paths meant for its
+  // OWN static mount. The video silently failed to load (readyState 0,
+  // networkState NETWORK_NO_SOURCE) with no visible error to the user.
+  const SERVER = "http://localhost:8010";
+
+  it("prefixes a root-relative backend path with the server origin", () => {
+    expect(mediaUrl(SERVER, "/media/proj/renders/final.mp4"))
+      .toBe("http://localhost:8010/media/proj/renders/final.mp4");
+  });
+
+  it("leaves an already-absolute URL untouched", () => {
+    expect(mediaUrl(SERVER, "https://cdn.example.com/final.mp4"))
+      .toBe("https://cdn.example.com/final.mp4");
+    expect(mediaUrl(SERVER, "http://other-host/final.mp4"))
+      .toBe("http://other-host/final.mp4");
+  });
+
+  it("returns null for null/undefined/empty input", () => {
+    expect(mediaUrl(SERVER, null)).toBeNull();
+    expect(mediaUrl(SERVER, undefined)).toBeNull();
+    expect(mediaUrl(SERVER, "")).toBeNull();
+  });
+
+  it("inserts a separating slash for a path missing the leading one", () => {
+    expect(mediaUrl(SERVER, "media/x.mp4")).toBe("http://localhost:8010/media/x.mp4");
   });
 });
