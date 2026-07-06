@@ -32,6 +32,7 @@ export default function JobDetailPage() {
   const [feedback, setFeedback] = useState("");
   const [approving, setApproving] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [actionError, setActionError] = useState("");
 
   // Inline edit state
   const [editMode, setEditMode] = useState(false);
@@ -104,20 +105,35 @@ export default function JobDetailPage() {
 
   async function handleRetry() {
     setRetrying(true);
-    await fetch(`${SERVER}/jobs/${jobId}/retry`, { method: "POST" });
-    setStatus("queued");
+    setActionError("");
+    const res = await fetch(`${SERVER}/jobs/${jobId}/retry`, { method: "POST" });
     setRetrying(false);
+    if (res.ok) {
+      setStatus("queued");
+      doneRef.current = false;   // job is live again — let SSE reconnect keep polling
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setActionError(body.detail ?? `重试失败 (HTTP ${res.status})`);
+    }
   }
 
   async function handleApproval(action: "approve" | "reject") {
     setApproving(true);
-    await fetch(`${SERVER}/jobs/${jobId}/approve`, {
+    setActionError("");
+    const res = await fetch(`${SERVER}/jobs/${jobId}/approve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, feedback }),
     });
-    setFeedback("");
     setApproving(false);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setActionError(
+        body.detail ?? `操作失败 (HTTP ${res.status}) — 任务状态可能已变化，请刷新页面查看最新状态`
+      );
+      return;
+    }
+    setFeedback("");
     if (action === "approve") setAwaitingStage(null);
   }
 
@@ -210,6 +226,17 @@ export default function JobDetailPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Any failed approve/reject/retry call — surfaced instead of silently
+          doing nothing (e.g. the job's real status moved on server-side, such
+          as being marked failed by a server restart while this tab was idle). */}
+      {actionError && (
+        <Card className="border-red-500/40 bg-red-500/5">
+          <CardContent className="pt-4 pb-4">
+            <p className="text-sm text-red-400">{actionError}</p>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Failed state retry */}
       {status === "failed" && (
