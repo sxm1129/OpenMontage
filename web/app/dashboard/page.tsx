@@ -83,7 +83,7 @@ export default function DashboardPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
           {jobs.map((job) => {
             const s = STATUS_META[job.status] ?? STATUS_META.queued;
-            const brandName = job.brand_info?.brand_name ?? job.project_name;
+            const displayName = job.project_name || job.brand_info?.brand_name || job.job_id;
             const contentLabel = CONTENT_TYPE_LABEL[job.content_type] ?? job.content_type;
             const date = new Date(job.created_at * 1000).toLocaleDateString("zh-CN");
             return (
@@ -107,7 +107,7 @@ export default function DashboardPage() {
                   </div>
                   <CardHeader className="pb-2">
                     <div className="flex items-start justify-between gap-2">
-                      <CardTitle className="text-base leading-tight">{brandName}</CardTitle>
+                      <CardTitle className="text-base leading-tight">{displayName}</CardTitle>
                       <span className={`shrink-0 text-[11px] px-2 py-0.5 rounded-full border font-medium ${s.cls}`}>
                         {s.label}
                       </span>
