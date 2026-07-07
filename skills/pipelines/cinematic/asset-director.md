@@ -117,6 +117,27 @@ Recommended metadata keys:
 >
 > Log the (pre, critique, post) triplet in the asset metadata for traceability. This mirrors the CHAI workflow and creates a record the reviewer can audit.
 
+### 4b. Multi-Shot Character/Product Consistency (Reference Image, Not Just Prompt Text)
+
+Repeating the same description across shots ("white disc-shaped robot vacuum...") is **not** enough — each text-to-video generation is an independent draw from the model, and prompt-only consistency routinely produces a visibly different product/character per shot (different color, material, proportions). This is a real, reproducible failure, not a hypothetical edge case.
+
+When a brief has a recurring character or product across 2+ generated video shots:
+
+1. **Generate one hero reference image first** (image-gen), showing the character/product clearly and neutrally.
+2. **Check whether the chosen video model supports reference conditioning** (`image_to_video` / `reference_to_video`). Not every model does — e.g. `leapfast/ltx-2.3` via `maas_video` is text-to-video only and silently ignores an `image_url`, so picking it for a multi-shot consistency-critical brief will fail quietly. Prefer a model that documents reference support (`seedance_video` / Seedance 2.0 is the strongest option here — see `.agents/skills/seedance-2-0/SKILL.md` for its `[reference_image: ...]` + `[identity_lock]` prompt syntax and identity-anchor phrases).
+3. **Reuse the exact same reference image across every shot** of that character/product — do not regenerate a fresh reference per shot.
+4. Log the reference image path and the model's reference-support status in the asset metadata, so a reviewer can tell at a glance whether consistency was actually attempted or just implied by prompt wording.
+
+If the available/approved video model has no reference-conditioning support, say so explicitly to the user before generating (per "Ask Before Major Changes") rather than silently accepting per-shot visual drift.
+
+### 4c. Never Bake Verbatim Text Into a Generated Image
+
+AI image models (FLUX2 and others) routinely distort embedded text — this is dramatically worse for CJK and other non-Latin scripts, where the failure mode isn't a tofu box or a misspelling but a **plausible-looking, completely wrong character substitution** that's easy to miss on a quick review. Brand names, slogans, end-card copy, CTAs, and any other verbatim on-screen text must never be requested as part of an image-generation prompt (e.g. "...with the text '小猫牌扫地机器人' painted on it").
+
+Instead: generate a text-free background/product image, and composite the real text as an overlay — Remotion's `EndTag`, `TextCard`, `HeroTitle`, `SectionTitle`, `StatCard`, and caption/comparison/chart components all render actual DOM text with a real font (including a bundled CJK fallback, see `remotion-composer/src/fonts.ts`), not a diffusion-model guess. This applies under any `render_runtime`/`composition_mode`, including atelier + ffmpeg-only compose: if the runtime can't do a Remotion/HTML text pass, use ffmpeg's `drawtext` with a real font file, not image-generation, to render the words.
+
+If a self-review or quality gate flags "text legibility unverified" on a generated image (this has happened before and shipped anyway — see `final_review.json` finding pattern), treat it as **critical**, not a suggestion: either verify the exact characters pixel-by-pixel against the intended copy, or replace the asset with a text-free background + real text overlay before publish.
+
 ### 5. Quality Gate
 
 - source and support assets are clearly distinguished,
@@ -143,6 +164,8 @@ the AI model's training data — it may be wrong or outdated.
 - Forgetting rights or provenance notes for supplied assets.
 - Quietly downgrading from video clips to still images because one provider or renderer failed.
 - Quietly switching providers or models after the user approved a generation path.
+- Generating each shot of a recurring character/product from an independent text-only prompt and expecting matching descriptions to keep it visually consistent — it won't. See "Multi-Shot Character/Product Consistency" above.
+- Asking an image-generation model to paint verbatim on-screen text (brand names, slogans, CTAs) into the image, especially CJK text. See "Never Bake Verbatim Text Into a Generated Image" above.
 
 
 ## When You Do Not Know How
