@@ -709,11 +709,20 @@ def _discover_render_url(project_dir: Path, project_name: str) -> str | None:
 
     candidate = _newest(list((project_dir / "renders").glob("*.mp4")))
     if candidate is None:
-        # Fallback: any mp4 the compose stage may have written under assets/
-        candidate = _newest(list(project_dir.glob("assets/**/*.mp4")))
+        # Fallback: a compose-family tool (video_compose/trimmer/stitch, all
+        # capability="video_post") wrote its output under assets/ instead of
+        # renders/. Scoped to video_post specifically — NOT assets/**/*.mp4 —
+        # because that glob also matches assets/video_generation/*.mp4, the
+        # RAW per-scene clips from maas_video. Confirmed live: a compose stage
+        # that never actually composed anything (all generation blocked,
+        # render_report honestly documented the failure) still left raw scene
+        # clips sitting in assets/video_generation/ from an earlier stage —
+        # the broad glob picked the newest one and presented a random 3s clip
+        # as if it were the finished film.
+        candidate = _newest(list(project_dir.glob("assets/video_post/*.mp4")))
     if candidate is None:
         # Last resort: a misnamed compose output (.bin) that is really an mp4
-        candidate = _newest(list(project_dir.glob("assets/**/*compose*output*")))
+        candidate = _newest(list(project_dir.glob("assets/video_post/*compose*output*")))
 
     if candidate is None:
         return None

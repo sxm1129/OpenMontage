@@ -84,6 +84,28 @@ def test_video_post_non_compose_stays_in_assets(tmp_path, monkeypatch):
     assert "/assets/video_post/" in op and "renders" not in op
 
 
+def test_repeated_calls_to_same_tool_get_distinct_output_paths(tmp_path, monkeypatch):
+    # Regression: a fixed "{tool_name}_output.{ext}" filename meant every call
+    # to the same tool within a job silently overwrote the previous one's
+    # file. Confirmed live: an assets-stage run that generated 6 distinct
+    # video clips (without the agent overriding output_path) left exactly ONE
+    # file on disk — each call clobbered the last.
+    tool = FakeTool(capability="video_generation")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+
+    paths = []
+    for _ in range(5):
+        execute_tool("run_openmontage_tool",
+                     {"tool_name": "maas_video", "inputs": {"prompt": "same prompt every time"}},
+                     tmp_path)
+        paths.append(tool.executed_with["output_path"])
+
+    assert len(set(paths)) == 5, f"expected 5 distinct paths, got {paths}"
+    assert all(p.endswith(".mp4") for p in paths)
+
+
 def test_budget_precheck_blocks_over_budget(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_generation", cost=5.0)
     acc = []

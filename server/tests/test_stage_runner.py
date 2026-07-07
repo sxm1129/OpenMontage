@@ -19,12 +19,29 @@ def test_discover_prefers_renders(tmp_path):
     assert _discover_render_url(proj, "p") == "/media/p/renders/final.mp4"
 
 
-def test_discover_falls_back_to_assets_mp4(tmp_path):
+def test_discover_falls_back_to_assets_video_post_mp4(tmp_path):
     proj = tmp_path / "p"
     (proj / "renders").mkdir(parents=True)
-    (proj / "assets" / "video").mkdir(parents=True)
-    (proj / "assets" / "video" / "clip.mp4").write_bytes(b"x")
-    assert _discover_render_url(proj, "p") == "/media/p/assets/video/clip.mp4"
+    (proj / "assets" / "video_post").mkdir(parents=True)
+    (proj / "assets" / "video_post" / "clip.mp4").write_bytes(b"x")
+    assert _discover_render_url(proj, "p") == "/media/p/assets/video_post/clip.mp4"
+
+
+def test_discover_ignores_raw_generation_clips(tmp_path):
+    # Regression: the fallback used to glob assets/**/*.mp4 — broad enough to
+    # match assets/video_generation/*.mp4, the RAW per-scene clips from
+    # maas_video. Confirmed live: a compose stage that never actually
+    # composed anything (all generation blocked, render_report honestly
+    # documented the failure) still left a raw scene clip sitting in
+    # assets/video_generation/ from an earlier stage — the broad glob picked
+    # it and presented a random few-second clip as if it were the finished
+    # film. Only assets/video_post/ (the compose-family tools' own capability
+    # folder) is a legitimate fallback location.
+    proj = tmp_path / "p"
+    (proj / "renders").mkdir(parents=True)
+    (proj / "assets" / "video_generation").mkdir(parents=True)
+    (proj / "assets" / "video_generation" / "maas_video_abc123.mp4").write_bytes(b"x")
+    assert _discover_render_url(proj, "p") is None
 
 
 def test_discover_misnamed_compose_bin(tmp_path):

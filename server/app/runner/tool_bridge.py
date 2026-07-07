@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -192,7 +193,16 @@ def execute_tool(
             else:
                 out_dir = project_dir / "assets" / tool.capability
                 out_dir.mkdir(parents=True, exist_ok=True)
-                inputs = {**inputs, "output_path": str(out_dir / f"{tool_name}_output.{ext}")}
+                # A fixed "{tool_name}_output.{ext}" filename meant every call
+                # to the same tool within a job silently overwrote the
+                # previous one's file — confirmed live: an assets-stage run
+                # that generated 6 distinct video clips (without the agent
+                # overriding output_path) left exactly ONE file on disk,
+                # since each call clobbered the last. A short random suffix
+                # gives every call — with or without a distinguishing
+                # prompt/parameter — its own file.
+                unique = uuid.uuid4().hex[:8]
+                inputs = {**inputs, "output_path": str(out_dir / f"{tool_name}_{unique}.{ext}")}
 
         # Hard budget ceiling — pre-call check. Bounds total spend to <= budget
         # by refusing a paid call that would cross it, instead of letting a
