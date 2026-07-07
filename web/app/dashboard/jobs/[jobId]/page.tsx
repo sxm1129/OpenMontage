@@ -47,8 +47,11 @@ export default function JobDetailPage() {
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastSeqRef = useRef(-1);
+  const lastEventTypeRef = useRef<string | null>(null); // type of the most recently processed event
   const doneRef = useRef(false);        // job reached a terminal state
   const cancelledRef = useRef(false);   // component unmounted — stop reconnecting
+  const connectRef = useRef<(() => EventSource | null) | null>(null);
+  const esRef = useRef<EventSource | null>(null);   // the currently live connection, if any
 
   // Seed real state on mount via REST — the SSE stream alone only carries
   // events from lastEventId onward; the page title (and cost/status on a
@@ -71,9 +74,11 @@ export default function JobDetailPage() {
       if (cancelledRef.current) return null;
       const url = `${SERVER}/jobs/${jobId}/events?lastEventId=${lastSeqRef.current}`;
       const es = new EventSource(url);
+      esRef.current = es;
       es.onmessage = (e) => {
         const ev: SseEvent = JSON.parse(e.data);
         lastSeqRef.current = ev.seq;
+        lastEventTypeRef.current = ev.type;
         setEvents((prev) => [...prev, ev]);
         if (ev.stage) setCurrentStage(ev.stage);
         if (ev.type === "job_started") {
@@ -105,13 +110,25 @@ export default function JobDetailPage() {
         if (ev.type === "job_completed") {
           setStatus("completed");
           setRenderUrl(ev.render_url ?? null);
-          doneRef.current = true;
-          es.close();
         }
-        if (ev.type === "job_failed") { setStatus("failed"); doneRef.current = true; es.close(); }
+        if (ev.type === "job_failed") { setStatus("failed"); }
       };
       es.onerror = () => {
         es.close();
+        // A replay (or any reconnect spanning more than one retry cycle) can
+        // contain an OLD job_failed from an earlier, since-superseded attempt
+        // followed by many more events from a later retry that finished
+        // differently (even a real job_completed) — see the matching comment
+        // in server/app/routers/events.py. So don't treat job_failed/
+        // job_completed as terminal at the moment they're seen; only stop
+        // reconnecting once the connection actually ends on one of them,
+        // which is exactly when the backend intentionally closed the stream.
+        const endedOnTerminalEvent =
+          lastEventTypeRef.current === "job_completed" || lastEventTypeRef.current === "job_failed";
+        if (endedOnTerminalEvent) {
+          doneRef.current = true;
+          return;
+        }
         // Reconnect only while the job is live and the view is still mounted.
         // (Uses refs, not the captured `status`, which would be stale here.)
         if (!doneRef.current && !cancelledRef.current) {
@@ -120,8 +137,9 @@ export default function JobDetailPage() {
       };
       return es;
     };
-    const es = connect();
-    return () => { cancelledRef.current = true; es?.close(); };
+    connectRef.current = connect;
+    connect();
+    return () => { cancelledRef.current = true; esRef.current?.close(); };
   }, [jobId]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [events]);
@@ -133,7 +151,12 @@ export default function JobDetailPage() {
     setRetrying(false);
     if (res.ok) {
       setStatus("queued");
-      doneRef.current = false;   // job is live again — let SSE reconnect keep polling
+      // The previous EventSource already closed (the backend ended that
+      // stream once it drained to the earlier terminal event) and nothing
+      // was scheduled to reconnect it, so open a fresh one from where we
+      // left off rather than just flipping a flag nothing reacts to.
+      doneRef.current = false;
+      connectRef.current?.();
     } else {
       const body = await res.json().catch(() => ({}));
       setActionError(body.detail ?? `重试失败 (HTTP ${res.status})`);
