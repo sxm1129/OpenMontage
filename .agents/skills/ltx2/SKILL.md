@@ -8,6 +8,24 @@ description: AI video generation with LTX-2.3 22B — text-to-video, image-to-vi
 Generate ~5 second video clips from text prompts or images using the LTX-2.3 22B DiT model.
 Runs on Modal (A100-80GB). Requires `MODAL_LTX2_ENDPOINT_URL` in `.env`.
 
+### MaaS Gateway Route
+
+The same LTX-2.3 22B model is also reachable via `tools/video/maas_video.py` as
+model `leapfast/ltx-2.3` (billed in CNY through the internal MaaS gateway,
+`best_for` lists it as "LTX-2.3 via self-hosted H100 GPU cluster"). Calling it
+that way uses `MaasVideo.execute({...})`, not the `tools/ltx2.py` CLI shown
+below — but the model behavior does carry over: the **Prompting Guide**,
+**Known Limitations**, and CJK note further down all apply regardless of
+which path you're calling through. One real difference: as of this writing
+`leapfast/ltx-2.3`'s gateway entry only declares `"ops": ["t2v"]` (see
+`MaasVideo.MODELS`) — i.e. **no `image_url`/reference conditioning** through
+that route, even though the model supports image-to-video via the direct
+Modal deployment (`--input` below). `maas_video.execute()` validates this and
+fails immediately (before spending money) if you request `image_to_video` or
+`reference_to_video` against a model whose declared `ops` don't include it —
+don't route around that check by guessing the gateway secretly supports more
+than it declares.
+
 ## Quick Reference
 
 ```bash
@@ -98,6 +116,15 @@ Keep prompts under 200 words. Be specific about the scene.
 
 # Describing text/UI (model can't render text reliably)
 "A website showing the text 'Welcome to our platform'"
+
+# Non-Latin script is worse, not just "also unreliable"
+"A shop sign reading 懒得动？交给小猫" — do not do this. Same failure mode as
+image-generation models baking in text (see flux-best-practices): the model
+won't render tofu boxes, it renders plausible-looking but wrong characters,
+which is easy to miss on a quick review and harder to catch than a Latin
+typo. Never prompt for on-screen text in any script; composite real text
+afterward in Remotion (which has a bundled CJK font fallback — see
+remotion-composer/src/fonts.ts) or via ffmpeg drawtext with a real font file.
 ```
 
 ## Video Production Use Cases
@@ -152,7 +179,7 @@ LTX-2 generates raw clips. Combine with the rest of the toolkit:
 ### Known Limitations
 
 - **Training data artifacts:** ~30% of generations may have unwanted logos/text from training data. Re-run with different `--seed`.
-- **Text rendering:** Cannot reliably generate readable text in video. Use Remotion overlays instead.
+- **Text rendering:** Cannot reliably generate readable text in video. Use Remotion overlays instead. This is worse for CJK/non-Latin scripts — expect confidently-wrong characters, not tofu boxes, so a quick glance won't catch it.
 - **Max duration:** ~8s per clip. Longer content needs stitching.
 - **Audio:** Generated audio is ambient/environmental only. Use voiceover/music tools for speech and music.
 - **License:** Community License — free under $10M revenue, commercial license needed above that.

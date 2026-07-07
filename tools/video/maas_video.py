@@ -53,7 +53,11 @@ class MaasVideo(BaseTool):
         "Optionally set MAAS_API_BASE to override the gateway URL\n"
         "(default: https://api.aiapbot.com)."
     )
-    agent_skills = ["ai-video-gen", "seedance-2-0"]
+    # seedance-2-0 covers the volcengine/doubao-seedance* and fanya/*
+    # models; ltx2 covers leapfast/ltx-2.3 specifically (same underlying
+    # LTX-2.3 22B model as the standalone tools/ltx2.py — see that skill's
+    # "MaaS Gateway Route" note for what does/doesn't carry over).
+    agent_skills = ["ai-video-gen", "seedance-2-0", "ltx2"]
 
     capabilities = ["text_to_video", "image_to_video", "reference_to_video", "video_edit"]
     supports = {
@@ -107,6 +111,16 @@ class MaasVideo(BaseTool):
         "leapfast/ltx-2.3":                          {"ops": ["t2v"],        "price_480p": 0.50, "price_720p": 0.70},
     }
     DEFAULT_MODEL = "volcengine/doubao-seedance-2.0"
+
+    # Maps the public `operation` enum to the MODELS[model]["ops"] short codes,
+    # so execute() can validate a request against what the chosen model
+    # actually supports.
+    _OPERATION_TO_OP_CODE = {
+        "text_to_video": "t2v",
+        "image_to_video": "i2v",
+        "reference_to_video": "r2v",
+        "video_edit": "video_edit",
+    }
 
     input_schema = {
         "type": "object",
@@ -222,6 +236,35 @@ class MaasVideo(BaseTool):
         operation = inputs.get("operation", "text_to_video")
         duration = inputs.get("duration_seconds", 5)
         resolution = inputs.get("resolution", "720p")
+
+        # Each model declares which ops it actually supports (MODELS[model]
+        # ["ops"]). Without this check, requesting image_to_video/
+        # reference_to_video against a t2v-only model (e.g. leapfast/ltx-2.3)
+        # silently drops the image_url from the payload below and returns a
+        # normal-looking text-to-video clip — the caller has no way to tell
+        # the reference was ignored short of comparing pixels across shots.
+        # That's exactly how a multi-shot consistency pass can burn real
+        # money on 4 independent generations before anyone notices none of
+        # them honored the reference. Fail loud, before the paid API call.
+        model_info = self.MODELS.get(model)
+        if model_info is None:
+            return ToolResult(
+                success=False,
+                error=f"Unknown model: {model!r}. See MaasVideo.MODELS for the supported catalogue.",
+            )
+        op_code = self._OPERATION_TO_OP_CODE.get(operation)
+        if op_code is not None and op_code not in model_info["ops"]:
+            supported = [
+                m for m, info in self.MODELS.items() if op_code in info["ops"]
+            ]
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Model {model!r} does not support operation {operation!r} "
+                    f"(it only supports: {model_info['ops']}). "
+                    f"Models that support {operation!r}: {supported}"
+                ),
+            )
 
         payload: dict[str, Any] = {
             "model": model,
