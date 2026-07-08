@@ -1,7 +1,14 @@
 """DolphinLitePark MaaS platform image generation tool.
 
-Calls POST /v1/images/generations (OpenAI-compatible, synchronous).
-Primary model: leapfast/flux2 — self-hosted FLUX.1 on the H100 GPU cluster.
+Calls POST /v1/images/generations (OpenAI-compatible, synchronous or async-
+task, see execute()). Two models:
+  - leapfast/flux2 — self-hosted FLUX.1 on the H100 GPU cluster. Supports
+    image-to-image via `input_image` (base64 data-uri or raw base64 — NOT a
+    URL, per docs/multimodal-call-guide-v4.md).
+  - gemini-3.1-flash-image-preview ("NanoBanana") — fast Visionular-backed
+    generation. Uses ratio-style `size` ("16x9"/"3x4"/"1x1", not pixel
+    dimensions) and a `quality` tier ("1K"/"2K"); image-to-image takes a
+    `reference_images` array of URLs (NOT base64 — the inverse of flux2).
 
 Gateway base URL: https://api.aiapbot.com (override via MAAS_API_BASE)
 Auth:            Authorization: Bearer <MAAS_API_KEY>
@@ -69,8 +76,10 @@ class MaasImage(BaseTool):
     # Models available for image generation on the MaaS platform
     MODELS = {
         "leapfast/flux2": {"desc": "Self-hosted FLUX.1 on H100 cluster, photorealistic"},
+        "gemini-3.1-flash-image-preview": {"desc": "NanoBanana — fast Visionular-backed generation"},
     }
     DEFAULT_MODEL = "leapfast/flux2"
+    _NANOBANANA_MODEL = "gemini-3.1-flash-image-preview"
 
     input_schema = {
         "type": "object",
@@ -79,12 +88,19 @@ class MaasImage(BaseTool):
             "prompt": {"type": "string", "description": "Image generation prompt"},
             "model": {
                 "type": "string",
-                "description": "Gateway model ID. Currently: leapfast/flux2",
+                "description": (
+                    "Gateway model ID: leapfast/flux2 (default, pixel-dimension "
+                    "size like '1024x1024') or gemini-3.1-flash-image-preview "
+                    "/ NanoBanana (ratio-style size like '16x9', see `quality`)"
+                ),
                 "default": "leapfast/flux2",
             },
             "size": {
                 "type": "string",
-                "description": "WxH e.g. '1024x1024', '1280x720', '768x1344'",
+                "description": (
+                    "leapfast/flux2: WxH pixel dims, e.g. '1024x1024', '1280x720', '768x1344'. "
+                    "gemini-3.1-flash-image-preview: ratio string, e.g. '16x9', '3x4', '1x1'."
+                ),
                 "default": "1024x1024",
             },
             "n": {
@@ -93,6 +109,27 @@ class MaasImage(BaseTool):
                 "description": "Number of images to generate",
             },
             "seed": {"type": "integer", "description": "Reproducibility seed"},
+            "input_image": {
+                "type": "string",
+                "description": (
+                    "leapfast/flux2 image-to-image: base64 reference image, "
+                    "as a data:image/png;base64,... URI or raw base64. Not a URL."
+                ),
+            },
+            "reference_images": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "gemini-3.1-flash-image-preview image-to-image: array of "
+                    "reference image URLs. Not base64 — the inverse of flux2's input_image."
+                ),
+            },
+            "quality": {
+                "type": "string",
+                "enum": ["1K", "2K"],
+                "default": "1K",
+                "description": "gemini-3.1-flash-image-preview only.",
+            },
             "output_path": {"type": "string", "description": "Local path to save the PNG"},
         },
     }
@@ -123,6 +160,39 @@ class MaasImage(BaseTool):
     def estimate_runtime(self, inputs: dict[str, Any]) -> float:
         return 15.0  # H100/FLUX2 is fast — typically 5-20s
 
+    def _build_payload(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Build the /v1/images/generations payload for the selected model.
+        Pulled out of execute() so the model-specific field mapping (see
+        module docstring) is unit-testable without a network call."""
+        model = inputs.get("model", self.DEFAULT_MODEL)
+        prompt = inputs["prompt"]
+        is_nanobanana = model == self._NANOBANANA_MODEL
+        # flux2's default size is pixel dimensions ("1024x1024"); NanoBanana
+        # takes a ratio string instead ("16x9") — a caller relying on the
+        # schema default while switching models would otherwise silently
+        # send a nonsensical ratio.
+        size = inputs.get("size") or ("16x9" if is_nanobanana else "1024x1024")
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "size": size,
+            "n": inputs.get("n", 1),
+            "response_format": "b64_json",
+        }
+        if inputs.get("seed") is not None:
+            payload["seed"] = inputs["seed"]
+
+        if is_nanobanana:
+            payload["quality"] = inputs.get("quality", "1K")
+            if inputs.get("reference_images"):
+                payload["images"] = inputs["reference_images"]
+        elif inputs.get("input_image"):
+            # flux2 image-to-image: base64 only, not a URL.
+            payload["input_image"] = inputs["input_image"]
+
+        return payload
+
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         import requests
 
@@ -136,17 +206,7 @@ class MaasImage(BaseTool):
         base_url = self._base_url()
         model = inputs.get("model", self.DEFAULT_MODEL)
         prompt = inputs["prompt"]
-        size = inputs.get("size", "1024x1024")
-
-        payload: dict[str, Any] = {
-            "model": model,
-            "prompt": prompt,
-            "size": size,
-            "n": inputs.get("n", 1),
-            "response_format": "b64_json",
-        }
-        if inputs.get("seed") is not None:
-            payload["seed"] = inputs["seed"]
+        payload = self._build_payload(inputs)
 
         start = time.time()
         try:
@@ -233,7 +293,7 @@ class MaasImage(BaseTool):
                 "provider": "maas",
                 "model": model,
                 "prompt": prompt,
-                "size": size,
+                "size": payload["size"],
                 "output": str(output_path),
                 "output_path": str(output_path),
                 "format": "png",
