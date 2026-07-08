@@ -1,10 +1,19 @@
 """DolphinLitePark MaaS platform TTS tool.
 
-POST /v1/audio/speech  — OpenAI-compatible TTS endpoint.
-Gateway handles all provider differences; client always sends the same shape.
+POST /v1/audio/speech — Gateway handles all provider differences, but NOT
+uniformly: per docs/multimodal-call-guide-v4.md, leapfast/indextts is an
+ASYNC job (the POST returns {"id": ..., "status": "processing"} immediately;
+the actual WAV only appears after polling GET /v1/audio/jobs/{id} to
+"succeeded" and downloading GET /v1/audio/jobs/{id}/result). This tool used
+to always stream the raw POST response straight to disk regardless of
+model — for indextts (this tool's own DEFAULT_MODEL) that meant writing the
+small `{"id":...,"status":"processing"}` JSON envelope to disk *as if it
+were the WAV file*, not the actual audio. cosyvoice-v3.5-flash and
+qwen3-tts-flash aren't covered by this doc, so their request shape is left
+as direct/synchronous — unconfirmed either way, but no evidence of a bug.
 
 Models available (2026-06-28):
-  leapfast/indextts       — Self-hosted IndexTTS on H100, Chinese+English, free
+  leapfast/indextts       — Self-hosted IndexTTS on H100, Chinese+English, free, ASYNC
   cosyvoice-v3.5-flash — DashScope CosyVoice, Chinese multi-speaker, free
   qwen3-tts-flash     — DashScope Qwen3 TTS, ¥1.60/M tokens
 
@@ -16,6 +25,9 @@ Voice map for leapfast/indextts (OpenAI names work too):
   nova    → zh_female_warm           (温暖女声)
   shimmer → zh_female_soothing       (舒缓女声)
   Or pass an IndexTTS native voice name directly.
+
+IndexTTS V3 emotion params (leapfast/indextts only — see input_schema):
+  emo_alpha, use_emo_text, emo_text, interval_silence.
 """
 
 from __future__ import annotations
@@ -98,6 +110,9 @@ class MaasTTS(BaseTool):
     }
     DEFAULT_VOICE = "alloy"
 
+    # Only leapfast/indextts is confirmed async by docs/multimodal-call-guide-v4.md.
+    _ASYNC_MODELS = {"leapfast/indextts"}
+
     input_schema = {
         "type": "object",
         "required": ["text"],
@@ -130,6 +145,28 @@ class MaasTTS(BaseTool):
                 "default": 1.0,
                 "description": "Speech rate (1.0 = normal)",
             },
+            "emo_alpha": {
+                "type": "number",
+                "default": 1.0,
+                "description": (
+                    "leapfast/indextts only (V3). Emotion intensity, 0.0 (flat) to 1.0 "
+                    "(strongest). 0.0 is a valid, meaningful value — do not treat as unset."
+                ),
+            },
+            "use_emo_text": {
+                "type": "boolean",
+                "default": False,
+                "description": "leapfast/indextts only (V3). Enable emo_text emotion guidance.",
+            },
+            "emo_text": {
+                "type": "string",
+                "description": "leapfast/indextts only (V3). Free-text emotion cue, e.g. 'excited', 'whispering'. Requires use_emo_text=true.",
+            },
+            "interval_silence": {
+                "type": "integer",
+                "default": 200,
+                "description": "leapfast/indextts only (V3). Inter-sentence pause in milliseconds, 0-2000.",
+            },
             "output_path": {"type": "string", "description": "Local path to save audio file"},
         },
     }
@@ -159,16 +196,8 @@ class MaasTTS(BaseTool):
         chars = len(inputs.get("text", ""))
         return max(5.0, chars / 20)  # rough: ~20 chars/s synthesis speed
 
-    def execute(self, inputs: dict[str, Any]) -> ToolResult:
-        import requests
-
-        api_key = self._api_key()
-        if not api_key:
-            return ToolResult(
-                success=False,
-                error="MAAS_API_KEY not set. " + self.install_instructions,
-            )
-
+    def _build_payload(self, inputs: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """Build the /v1/audio/speech payload. Returns (payload, resolved_format)."""
         model = inputs.get("model", self.DEFAULT_MODEL)
         voice = inputs.get("voice", self.DEFAULT_VOICE)
         fmt = inputs.get("format", "mp3")
@@ -187,28 +216,113 @@ class MaasTTS(BaseTool):
         if inputs.get("speed") and inputs["speed"] != 1.0:
             payload["speed"] = inputs["speed"]
 
-        ext = fmt
-        output_path = Path(inputs.get("output_path", f"maas_tts_{int(time.time())}.{ext}"))
+        if model == "leapfast/indextts":
+            # V3 emotion/pause params — indextts-specific, per
+            # docs/multimodal-call-guide-v4.md. emo_alpha=0.0 is a valid,
+            # meaningful value (flattest delivery), so this must be an
+            # `is not None` check, not a truthy one, or a caller deliberately
+            # asking for a flat reading would silently get the default instead.
+            if inputs.get("emo_alpha") is not None:
+                payload["emo_alpha"] = inputs["emo_alpha"]
+            if inputs.get("use_emo_text"):
+                payload["use_emo_text"] = True
+                if inputs.get("emo_text"):
+                    payload["emo_text"] = inputs["emo_text"]
+            if inputs.get("interval_silence") is not None:
+                payload["interval_silence"] = inputs["interval_silence"]
+
+        return payload, fmt
+
+    def execute(self, inputs: dict[str, Any]) -> ToolResult:
+        import requests
+
+        api_key = self._api_key()
+        if not api_key:
+            return ToolResult(
+                success=False,
+                error="MAAS_API_KEY not set. " + self.install_instructions,
+            )
+
+        model = inputs.get("model", self.DEFAULT_MODEL)
+        voice = inputs.get("voice", self.DEFAULT_VOICE)
+        text = inputs["text"]
+        payload, fmt = self._build_payload(inputs)
+
+        output_path = Path(inputs.get("output_path", f"maas_tts_{int(time.time())}.{fmt}"))
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
 
         start = time.time()
-        try:
-            resp = requests.post(
-                f"{self._base_url()}/v1/audio/speech",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                stream=True,
-                timeout=120,
-            )
-            resp.raise_for_status()
-            with open(output_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        except Exception as e:
-            return ToolResult(success=False, error=f"MaaS TTS failed: {e}")
+        if model in self._ASYNC_MODELS:
+            try:
+                submit = requests.post(
+                    f"{self._base_url()}/v1/audio/speech",
+                    headers=headers,
+                    json=payload,
+                    timeout=30,
+                )
+                submit.raise_for_status()
+            except Exception as e:
+                return ToolResult(success=False, error=f"MaaS TTS submit failed: {e}")
+
+            job_id = submit.json().get("id")
+            if not job_id:
+                return ToolResult(
+                    success=False,
+                    error=f"No job id in MaaS TTS submit response: {submit.json()}",
+                )
+
+            deadline = start + 60
+            while time.time() < deadline:
+                time.sleep(2)
+                try:
+                    poll = requests.get(
+                        f"{self._base_url()}/v1/audio/jobs/{job_id}",
+                        headers=headers,
+                        timeout=15,
+                    )
+                    poll.raise_for_status()
+                except Exception:
+                    continue  # transient — retry on the next interval
+                status = poll.json().get("status", "unknown")
+                if status == "succeeded":
+                    break
+                if status in ("failed", "cancelled"):
+                    return ToolResult(success=False, error=f"MaaS TTS job {status}: {poll.json()}")
+            else:
+                return ToolResult(success=False, error=f"MaaS TTS job timed out (job_id={job_id})")
+
+            try:
+                dl = requests.get(
+                    f"{self._base_url()}/v1/audio/jobs/{job_id}/result",
+                    headers=headers,
+                    stream=True,
+                    timeout=60,
+                )
+                dl.raise_for_status()
+                with open(output_path, "wb") as f:
+                    for chunk in dl.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            except Exception as e:
+                return ToolResult(success=False, error=f"MaaS TTS download failed: {e}")
+        else:
+            try:
+                resp = requests.post(
+                    f"{self._base_url()}/v1/audio/speech",
+                    headers=headers,
+                    json=payload,
+                    stream=True,
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                with open(output_path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            except Exception as e:
+                return ToolResult(success=False, error=f"MaaS TTS failed: {e}")
 
         # Probe duration if possible
         audio_duration = None
