@@ -41,7 +41,12 @@ except Exception:  # pragma: no cover - cost ledger is optional
 # ── MaaS LLM client ───────────────────────────────────────────────────────────
 MAAS_KEY  = os.environ.get("MAAS_API_KEY", "")
 MAAS_BASE = os.environ.get("MAAS_API_BASE", "https://api.aiapbot.com")
-LLM_MODEL = "anthropic/claude-sonnet-4.6"
+# Overridable so alternative gateway models (e.g. bailian/deepseek-v4-pro,
+# OpenAI-compatible per docs/multimodal-call-guide-v4.md) can be evaluated
+# without a code change — this is the model driving every pipeline stage's
+# reasoning, so swapping it is a deliberate, explicit choice (env var), never
+# a silent default change.
+LLM_MODEL = os.environ.get("MAAS_LLM_MODEL", "anthropic/claude-sonnet-4.6")
 
 llm = OpenAI(api_key=MAAS_KEY, base_url=f"{MAAS_BASE}/v1")
 
