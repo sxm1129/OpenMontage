@@ -2,11 +2,26 @@
 
 Calls the internal MaaS gateway at /v1/video/generations using an async
 polling pattern. Supports text-to-video, image-to-video, reference-to-video
-and video-edit across 16 models from Volcengine Seedance, DashScope Wan /
-HappyHorse, H100/LTX and the fanya alias.
+and video-edit across 17 models from Volcengine Seedance, DashScope Wan /
+HappyHorse, H100/LTX, H100/Wan2.2 and the fanya alias.
 
 Gateway base URL: https://api.aiapbot.com (override via MAAS_API_BASE)
 Auth:            Authorization: Bearer <MAAS_API_KEY>
+
+Reference-image field names are NOT uniform across model families (per
+docs/multimodal-call-guide-v4.md) — sending the wrong field name for a model
+doesn't error, it just silently drops the reference, so this matters more
+than it looks:
+  - leapfast/ltx-2.3, leapfast/wan2.2: `image` (base64/data-uri, preferred)
+    | `image_url` (public URL) | `image_base64` (explicit, highest
+    priority) — mutually exclusive.
+  - happyhorse-1.0-i2v / -r2v: `image` (URL only, >=300x300px) — note this
+    is a URL despite sharing a field name with LTX/Wan2.2's base64 field.
+  - volcengine Seedance family: no standard-DTO image field is documented
+    at all — only a native-passthrough `content: [...]` array (see
+    MaasVideo._build_payload). Also: image_to_video/reference_to_video for
+    this family must NOT include duration_seconds, or the upstream
+    Volcengine API rejects it with InvalidParameter (400).
 """
 
 from __future__ import annotations
@@ -75,6 +90,7 @@ class MaasVideo(BaseTool):
         "HappyHorse 1.0 high-end production (720p–1080p)",
         "Wan 2.7 cost-effective I2V and video-edit",
         "LTX-2.3 via self-hosted H100 GPU cluster",
+        "leapfast/wan2.2: cheaper/faster H100 T2V+I2V previews when the clip doesn't need audio",
     ]
     not_good_for = [
         "offline / air-gapped environments",
@@ -82,8 +98,9 @@ class MaasVideo(BaseTool):
     ]
     fallback_tools = ["seedance_video", "wan_video", "kling_video"]
 
-    # ── Model catalogue (sourced from maas.aiapbot.com/models, 2026-06-28) ──
-    # 16 video models across 4 provider families.
+    # ── Model catalogue (sourced from maas.aiapbot.com/models, 2026-06-28;
+    # leapfast/wan2.2 added 2026-07-08 per docs/multimodal-call-guide-v4.md) ──
+    # 17 video models across 4 provider families.
     # Pricing is in CNY per second of generated video.
     MODELS = {
         # ── Volcengine Seedance ───────────────────────────────────────────────
@@ -109,8 +126,24 @@ class MaasVideo(BaseTool):
         "happyhorse-1.0-video-edit":             {"ops": ["video_edit"], "price_720p": 1.17, "price_1080p": 2.08},
         # ── H100 Self-hosted GPU Cluster ─────────────────────────────────────
         "leapfast/ltx-2.3":                          {"ops": ["t2v"],        "price_480p": 0.50, "price_720p": 0.70},
+        # Lighter/faster than LTX-2.3, same H100 cluster. No audio track —
+        # route to leapfast/ltx-2.3 instead if the caller needs sound.
+        "leapfast/wan2.2":                           {"ops": ["t2v", "i2v"], "price_720p": 0.35},
     }
     DEFAULT_MODEL = "volcengine/doubao-seedance-2.0"
+
+    # Model families needing payload shapes that diverge from the standard
+    # DTO built below — see the module docstring for why.
+    _SEEDANCE_MODELS = {
+        "volcengine/doubao-seedance-2.0",
+        "volcengine/doubao-seedance-2.0-fast",
+        "volcengine/doubao-seedance-1.5-pro",
+        "volcengine/doubao-seedance-1.0-pro",
+        "volcengine/doubao-seedance-1.0-pro-fast",
+        "fanya/seedance2.0",
+    }
+    _HAPPYHORSE_I2V_MODELS = {"happyhorse-1.0-i2v", "happyhorse-1.0-r2v"}
+    _WAN22_SIZE_BY_ASPECT = {"16:9": "1280*704", "9:16": "704*1280", "1:1": "1280*704"}
 
     # Maps the public `operation` enum to the MODELS[model]["ops"] short codes,
     # so execute() can validate a request against what the chosen model
@@ -130,12 +163,15 @@ class MaasVideo(BaseTool):
             "model": {
                 "type": "string",
                 "description": (
-                    "Gateway model ID. Available models (16 total):\n"
+                    "Gateway model ID. Available models (17 total):\n"
                     "T2V: volcengine/doubao-seedance-2.0 (default), volcengine/doubao-seedance-2.0-fast, "
                     "volcengine/doubao-seedance-1.5-pro, volcengine/doubao-seedance-1.0-pro, "
                     "volcengine/doubao-seedance-1.0-pro-fast, fanya/seedance2.0, "
-                    "wanx2.1-t2v-plus, wanx2.1-t2v-turbo, happyhorse-1.0-t2v, leapfast/ltx-2.3\n"
-                    "I2V: wan2.7-i2v, wanx2.1-i2v-plus, happyhorse-1.0-i2v\n"
+                    "wanx2.1-t2v-plus, wanx2.1-t2v-turbo, happyhorse-1.0-t2v, leapfast/ltx-2.3, "
+                    "leapfast/wan2.2 (no audio track — use leapfast/ltx-2.3 if sound is needed)\n"
+                    "I2V: wan2.7-i2v, wanx2.1-i2v-plus, happyhorse-1.0-i2v, leapfast/wan2.2, "
+                    "volcengine/doubao-seedance-2.0 (and other seedance variants — routed via "
+                    "native passthrough, see image_url)\n"
                     "R2V: happyhorse-1.0-r2v\n"
                     "Edit: wan2.7-videoedit, happyhorse-1.0-video-edit"
                 ),
@@ -170,7 +206,25 @@ class MaasVideo(BaseTool):
             },
             "image_url": {
                 "type": "string",
-                "description": "Public image URL for image_to_video operation",
+                "description": (
+                    "Public image URL for image_to_video/reference_to_video. "
+                    "Routed to the correct field name per model family "
+                    "internally (see module docstring) — always pass the URL "
+                    "here regardless of which model you picked."
+                ),
+            },
+            "image_base64": {
+                "type": "string",
+                "description": (
+                    "data:image/...;base64,... reference image, for models "
+                    "that accept base64 directly (leapfast/ltx-2.3, "
+                    "leapfast/wan2.2). Takes priority over image_url when set."
+                ),
+            },
+            "image_strength": {
+                "type": "number",
+                "default": 0.8,
+                "description": "leapfast/ltx-2.3 only: reference-frame lock strength, 0 (ignore) to 1 (hard lock).",
             },
             "output_path": {"type": "string", "description": "Local path to save the MP4"},
         },
@@ -216,6 +270,70 @@ class MaasVideo(BaseTool):
         # Seedance 2.0 typically takes 60-120s; longer clips take more time
         return 90.0 + (duration - 5) * 15.0
 
+    def _build_payload(
+        self, model: str, operation: str, inputs: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """Build the gateway request payload (and any extra headers) for this
+        model family. See the module docstring for why this can't be one
+        shape shared across every model."""
+        prompt = inputs["prompt"]
+        image_url = inputs.get("image_url")
+        image_b64 = inputs.get("image_base64")
+        wants_reference = operation in ("image_to_video", "reference_to_video")
+
+        if model in self._SEEDANCE_MODELS and wants_reference:
+            # No standard-DTO image field is documented for this family —
+            # only native passthrough. duration_seconds is deliberately
+            # omitted: Volcengine's own API rejects it on i2v/r2v with a 400
+            # InvalidParameter error.
+            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            ref = image_b64 or image_url
+            if ref:
+                content.append({"type": "image_url", "image_url": {"url": ref}})
+            payload: dict[str, Any] = {"model": f"native/{model}", "content": content}
+            if inputs.get("aspect_ratio"):
+                payload["ratio"] = inputs["aspect_ratio"]
+            return payload, {"X-DLP-Passthrough": "true"}
+
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "duration_seconds": inputs.get("duration_seconds", 5),
+            "resolution": inputs.get("resolution", "720p"),
+            "audio": inputs.get("audio", True),
+        }
+        if inputs.get("aspect_ratio"):
+            payload["ratio"] = inputs["aspect_ratio"]
+
+        if wants_reference:
+            if model in self._HAPPYHORSE_I2V_MODELS:
+                # HappyHorse's standard DTO takes the reference as a plain
+                # URL under `image` — NOT `image_url` (that field name is
+                # only meaningful to the LTX/Wan2.2 family below).
+                if image_url:
+                    payload["image"] = image_url
+            else:
+                # leapfast/ltx-2.3, leapfast/wan2.2, and the DashScope Wan/
+                # Wanx models: image_base64 > image_url priority, matching
+                # the gateway's documented precedence for this family.
+                if image_b64:
+                    payload["image"] = image_b64
+                elif image_url:
+                    payload["image_url"] = image_url
+                if model == "leapfast/ltx-2.3":
+                    payload["image_strength"] = inputs.get("image_strength", 0.8)
+
+        if model == "leapfast/wan2.2":
+            # No resolution enum or audio track for this model — it uses its
+            # own fixed size grid instead.
+            payload.pop("resolution", None)
+            payload.pop("audio", None)
+            payload["size"] = self._WAN22_SIZE_BY_ASPECT.get(
+                inputs.get("aspect_ratio", "16:9"), "1280*704"
+            )
+
+        return payload, {}
+
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         import requests
 
@@ -234,7 +352,6 @@ class MaasVideo(BaseTool):
 
         model = inputs.get("model", self.DEFAULT_MODEL)
         operation = inputs.get("operation", "text_to_video")
-        duration = inputs.get("duration_seconds", 5)
         resolution = inputs.get("resolution", "720p")
 
         # Each model declares which ops it actually supports (MODELS[model]
@@ -266,17 +383,8 @@ class MaasVideo(BaseTool):
                 ),
             )
 
-        payload: dict[str, Any] = {
-            "model": model,
-            "prompt": inputs["prompt"],
-            "duration_seconds": duration,
-            "resolution": resolution,
-            "audio": inputs.get("audio", True),
-        }
-        if inputs.get("aspect_ratio"):
-            payload["ratio"] = inputs["aspect_ratio"]
-        if operation == "image_to_video" and inputs.get("image_url"):
-            payload["image_url"] = inputs["image_url"]
+        payload, extra_headers = self._build_payload(model, operation, inputs)
+        headers.update(extra_headers)
 
         start = time.time()
 

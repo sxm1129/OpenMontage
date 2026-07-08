@@ -1,7 +1,7 @@
 ---
 name: seedance-2-0
 description: |
-  Generate cinematic clips with ByteDance Seedance 2.0 — the preferred premium video model in OpenMontage when a paid gateway is configured. Use when: (1) producing trailers, teasers, hype edits, or premium cinematic clips, (2) needing native synchronized audio (speech, SFX, ambience) in a single pass, (3) needing multi-shot cuts inside one generation, (4) needing director-level camera control, (5) needing lip-sync from quoted dialogue in the prompt, (6) needing reference-conditioned generation with up to 9 images + 3 video clips + 3 audio clips, (7) wanting consistent character identity across shots. Accessible via fal.ai (`seedance_video` tool), HeyGen (Video Agent / Avatar Shots), Replicate, Runway (Enterprise, non-US), Freepik, BytePlus ModelArk, Higgsfield, Pollo, and other aggregators.
+  Generate cinematic clips with ByteDance Seedance 2.0 — the preferred premium video model in OpenMontage when a paid gateway is configured. Use when: (1) producing trailers, teasers, hype edits, or premium cinematic clips, (2) needing native synchronized audio (speech, SFX, ambience) in a single pass, (3) needing multi-shot cuts inside one generation, (4) needing director-level camera control, (5) needing lip-sync from quoted dialogue in the prompt, (6) needing reference-conditioned generation with up to 9 images + 3 video clips + 3 audio clips, (7) wanting consistent character identity across shots. Accessible via fal.ai (`seedance_video` tool), HeyGen (Video Agent / Avatar Shots), Replicate, Runway (Enterprise, non-US), Freepik, BytePlus ModelArk, Higgsfield, Pollo, DolphinLitePark MaaS gateway (`maas_video` tool), and other aggregators.
 allowed-tools: Bash, Read, Write
 metadata:
   openclaw:
@@ -10,11 +10,12 @@ metadata:
         - FAL_KEY
         - HEYGEN_API_KEY
         - REPLICATE_API_TOKEN
+        - MAAS_API_KEY
 ---
 
 # Seedance 2.0 (ByteDance)
 
-Seedance 2.0 is the ByteDance Seed team's unified multimodal video+audio model (released Feb 2026, globally available via partner APIs April 2026). It is the **preferred premium default** for cinematic, trailer, teaser, and motion-led work inside OpenMontage whenever any supporting gateway is configured. OpenMontage wraps four gateways directly (`seedance_video` → fal.ai, `seedance_replicate` → Replicate, `runway_video` with `model="seedance_2.0"` → Runway, `higgsfield_video` with `model="seedance_2.0"` → Higgsfield); BytePlus / Freepik / HeyGen-Video-Agent wrappers are on the roadmap. The scoring engine deduplicates by `provider="seedance"` so whichever gateway the user has configured wins automatically — agents should pass `preferred_provider="seedance"` to `video_selector` (or let the scorer pick) rather than routing to a specific gateway by name.
+Seedance 2.0 is the ByteDance Seed team's unified multimodal video+audio model (released Feb 2026, globally available via partner APIs April 2026). It is the **preferred premium default** for cinematic, trailer, teaser, and motion-led work inside OpenMontage whenever any supporting gateway is configured. OpenMontage wraps five gateways directly (`seedance_video` → fal.ai, `seedance_replicate` → Replicate, `runway_video` with `model="seedance_2.0"` → Runway, `higgsfield_video` with `model="seedance_2.0"` → Higgsfield, `maas_video` → DolphinLitePark MaaS gateway); BytePlus / Freepik / HeyGen-Video-Agent wrappers are on the roadmap. The scoring engine deduplicates by `provider="seedance"` so whichever gateway the user has configured wins automatically — agents should pass `preferred_provider="seedance"` to `video_selector` (or let the scorer pick) rather than routing to a specific gateway by name. **If only `MAAS_API_KEY` is configured** (check `provider_menu_summary()` — this is the common case in this codebase), the selector-based examples below won't apply; read "MaaS Gateway Route" first.
 
 ## Why it is the OpenMontage premium default
 
@@ -59,7 +60,34 @@ bytedance/seedance-2.0/fast/reference-to-video
 Pricing (fal.ai, 720p): standard $0.3034 / s (T2V), $0.3024 / s (I2V). Fast $0.2419 / s across endpoints.
 The `fast` variant trades some camera/motion fidelity for latency and cost — do **not** route slow-mo, multi-shot, or dolly-heavy prompts to `fast` on the first try.
 
-## Calling Seedance 2.0 inside OpenMontage
+## MaaS Gateway Route
+
+`maas_video` (`tools/video/maas_video.py`) reaches Seedance 2.0 through the DolphinLitePark MaaS gateway as models `volcengine/doubao-seedance-2.0` (and `-fast`, `-1.5-pro`, `-1.0-pro`, `-1.0-pro-fast`, plus the `fanya/seedance2.0` alias) — a **sixth** access path not listed in the provider table above, and the one actually configured in this codebase by default (`MAAS_API_KEY`, no `FAL_KEY` needed). The identity-lock prompting technique below (reference images, anti-drift phrases) applies the same regardless of gateway. Two gateway-specific gotchas that differ from the fal.ai examples further down:
+
+1. **No standard `image`/`image_url` field for i2v/r2v.** Unlike fal.ai's flat request shape, the MaaS gateway only exposes Seedance image-to-video/reference-to-video through **native passthrough** — `maas_video.execute()` handles this for you (builds `model: "native/volcengine/doubao-seedance-2.0"` + a `content: [{type:"text",...}, {type:"image_url",...}]` array internally), so just pass `image_url` as normal and let the tool translate it. Don't try to pass a flat `image`/`image_url` through a *different* Seedance-family tool without checking it does the same translation first.
+2. **Never pass `duration_seconds` on image_to_video/reference_to_video.** Volcengine's own API rejects it with an `InvalidParameter` 400 for this operation (fine on `text_to_video`). `maas_video.execute()` already omits it automatically for Seedance i2v/r2v — this is a backend constraint, not a client choice, so don't work around it by passing duration some other way.
+
+```python
+from tools.tool_registry import registry
+registry.ensure_discovered()
+maas_video = registry.get("maas_video")
+
+# Generate ONE reference hero image first (e.g. via maas_image), then reuse
+# its URL/path across every subsequent shot for character consistency —
+# same identity-lock principle as the fal.ai reference-to-video path below.
+result = maas_video.execute({
+    "prompt": "The same rabbit mascot, now walking toward the sofa, warm evening light",
+    "model": "volcengine/doubao-seedance-2.0",
+    "operation": "image_to_video",
+    "image_url": hero_reference_url,
+    "aspect_ratio": "16:9",
+    "resolution": "720p",
+    "output_path": "projects/<proj>/assets/video/clip_02.mp4",
+    # duration_seconds intentionally omitted — see gotcha #2 above.
+})
+```
+
+## Calling Seedance 2.0 inside OpenMontage (fal.ai / other gateways)
 
 Always go through `video_selector` with `preferred_provider="seedance"` (or let the scoring engine pick it):
 
