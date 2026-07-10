@@ -30,6 +30,12 @@ export default function JobDetailPage() {
   // produced — well before publish (packaging/distribution metadata) finishes.
   // Distinct from renderUrl, which is only set once the whole job completes.
   const [previewRenderUrl, setPreviewRenderUrl] = useState<string | null>(null);
+  // A/B variant job only: sibling plural dicts alongside renderUrl/
+  // previewRenderUrl, keyed by a short model-derived slug (e.g. "ltx-2-3").
+  // Null/empty for a normal (non-variant) job — the singular fields above
+  // remain the source of truth for that case.
+  const [renderUrls, setRenderUrls] = useState<Record<string, string> | null>(null);
+  const [previewRenderUrls, setPreviewRenderUrls] = useState<Record<string, string> | null>(null);
   const [costCny, setCostCny] = useState<number>(0);
   const [budgetCny, setBudgetCny] = useState<number | null>(null);
 
@@ -64,6 +70,8 @@ export default function JobDetailPage() {
         if (job.project_name) setProjectName(job.project_name);
         if (job.render_url) setRenderUrl(job.render_url);
         if (job.preview_render_url) setPreviewRenderUrl(job.preview_render_url);
+        if (job.render_urls) setRenderUrls(job.render_urls);
+        if (job.preview_render_urls) setPreviewRenderUrls(job.preview_render_urls);
       })
       .catch(() => {});
   }, [jobId]);
@@ -106,10 +114,12 @@ export default function JobDetailPage() {
         }
         if (ev.type === "preview_ready") {
           setPreviewRenderUrl(ev.render_url ?? null);
+          setPreviewRenderUrls(ev.render_urls ?? null);
         }
         if (ev.type === "job_completed") {
           setStatus("completed");
           setRenderUrl(ev.render_url ?? null);
+          setRenderUrls(ev.render_urls ?? null);
         }
         if (ev.type === "job_failed") { setStatus("failed"); }
       };
@@ -388,7 +398,18 @@ export default function JobDetailPage() {
             <CardTitle className="text-base text-blue-400">👁 合成预览（尚未发布）</CardTitle>
           </CardHeader>
           <CardContent className="space-y-1">
-            <video src={mediaUrl(SERVER, previewRenderUrl) ?? undefined} controls className="w-full rounded-lg bg-black aspect-video" />
+            {previewRenderUrls && Object.keys(previewRenderUrls).length > 0 ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {Object.entries(previewRenderUrls).map(([slug, url]) => (
+                  <div key={slug} className="space-y-1">
+                    <video src={mediaUrl(SERVER, url) ?? undefined} controls className="w-full rounded-lg bg-black aspect-video" />
+                    <span className="text-xs text-muted-foreground block">版本: {slug}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <video src={mediaUrl(SERVER, previewRenderUrl) ?? undefined} controls className="w-full rounded-lg bg-black aspect-video" />
+            )}
             <p className="text-xs text-muted-foreground">合成阶段已产出，后续阶段可能还会调整</p>
           </CardContent>
         </Card>
@@ -401,10 +422,26 @@ export default function JobDetailPage() {
             <CardTitle className="text-base text-green-400">🎬 成片已就绪</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <video src={mediaUrl(SERVER, renderUrl) ?? undefined} controls className="w-full rounded-lg bg-black aspect-video" />
-            <a href={mediaUrl(SERVER, renderUrl) ?? undefined} download>
-              <Button variant="outline" className="w-full">下载 MP4</Button>
-            </a>
+            {renderUrls && Object.keys(renderUrls).length > 0 ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {Object.entries(renderUrls).map(([slug, url]) => (
+                  <div key={slug} className="space-y-2">
+                    <video src={mediaUrl(SERVER, url) ?? undefined} controls className="w-full rounded-lg bg-black aspect-video" />
+                    <span className="text-xs text-muted-foreground block">版本: {slug}</span>
+                    <a href={mediaUrl(SERVER, url) ?? undefined} download>
+                      <Button variant="outline" className="w-full">下载 MP4</Button>
+                    </a>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <>
+                <video src={mediaUrl(SERVER, renderUrl) ?? undefined} controls className="w-full rounded-lg bg-black aspect-video" />
+                <a href={mediaUrl(SERVER, renderUrl) ?? undefined} download>
+                  <Button variant="outline" className="w-full">下载 MP4</Button>
+                </a>
+              </>
+            )}
           </CardContent>
         </Card>
       )}

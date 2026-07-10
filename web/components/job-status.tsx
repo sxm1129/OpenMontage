@@ -13,6 +13,11 @@ export type SseEvent = {
   artifact?: string;
   preview?: unknown;
   render_url?: string;
+  // A/B variant job only (see wizard's "对比模式" toggle): sibling dict
+  // alongside render_url, keyed by a short model-derived slug (e.g.
+  // "ltx-2-3"), one entry per variant. Absent/undefined for a normal
+  // (non-variant) job — render_url alone remains authoritative there.
+  render_urls?: Record<string, string>;
   message?: string;
   cost_cny?: number;
   budget_cny?: number | null;
