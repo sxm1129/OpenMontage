@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,7 +15,39 @@ import {
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
-type BrandKit = { kit_id: string; brand_name: string; slogan: string };
+// Hardcoded model option lists — no dynamic capability-fetch endpoint exists
+// yet on the backend, so these mirror exactly what tool_bridge.py /
+// stage_runner.py accept via options.video_model / image_model / tts_model.
+const VIDEO_MODELS = [
+  { id: "leapfast/ltx-2.3", label: "LTX 2.3" },
+  { id: "leapfast/wan2.2", label: "Wan2.2 (无音轨)" },
+  { id: "volcengine/doubao-seedance-2.0", label: "Seedance 2.0" },
+] as const;
+const IMAGE_MODELS = [
+  { id: "leapfast/flux2", label: "Flux2" },
+  { id: "gemini-3.1-flash-image-preview", label: "NanoBanana" },
+] as const;
+const TTS_MODELS = [
+  { id: "qwen3-tts-flash", label: "Qwen3 TTS" },
+  { id: "leapfast/indextts", label: "IndexTTS" },
+] as const;
+
+const DEFAULT_VIDEO_MODEL = VIDEO_MODELS[0].id;
+const DEFAULT_IMAGE_MODEL = IMAGE_MODELS[0].id;
+const DEFAULT_TTS_MODEL = TTS_MODELS[0].id;
+
+// Picks a video model different from `exclude`, for the comparison-mode
+// second slot — guarantees the two pickers never default to the same model.
+function otherVideoModel(exclude: string): string {
+  return VIDEO_MODELS.find((m) => m.id !== exclude)?.id ?? VIDEO_MODELS[0].id;
+}
+
+type BrandKit = {
+  kit_id: string;
+  brand_name: string;
+  slogan: string;
+  reference_image_path?: string;
+};
 type Step = "type" | "wizard";
 
 export default function NewProjectPage() {
@@ -34,6 +67,20 @@ export default function NewProjectPage() {
   });
   const [loading, setLoading] = useState(false);
 
+  const [videoModel, setVideoModel] = useState<string>(DEFAULT_VIDEO_MODEL);
+  const [compareMode, setCompareMode] = useState(false);
+  const [videoModelB, setVideoModelB] = useState<string>(() => otherVideoModel(DEFAULT_VIDEO_MODEL));
+  const [imageModel, setImageModel] = useState<string>(DEFAULT_IMAGE_MODEL);
+  const [ttsModel, setTtsModel] = useState<string>(DEFAULT_TTS_MODEL);
+
+  // IndexTTS V3-only emotion params (tools/audio/maas_tts.py's emo_alpha /
+  // use_emo_text / emo_text / interval_silence) — meaningless for other TTS
+  // models, so only sent when ttsModel is leapfast/indextts.
+  const [emoAlpha, setEmoAlpha] = useState(1.0);
+  const [useEmoText, setUseEmoText] = useState(false);
+  const [emoText, setEmoText] = useState("");
+  const [intervalSilence, setIntervalSilence] = useState(200);
+
   useEffect(() => {
     fetch(`${SERVER}/brands`)
       .then((r) => r.json())
@@ -47,6 +94,8 @@ export default function NewProjectPage() {
 
   const availableNames = new Set(pipelines.map((p) => p.name));
   const morePipelines = computeMorePipelines(pipelines);
+
+  const selectedKit = brandKits.find((k) => k.kit_id === form.brandKitId);
 
   function applyKit(kit: BrandKit) {
     setForm((f) => ({
@@ -76,9 +125,18 @@ export default function NewProjectPage() {
         },
         options: {
           duration_seconds: parseInt(form.duration),
-          video_model: "leapfast/ltx-2.3",
-          image_model: "leapfast/flux2",
-          tts_model: "qwen3-tts-flash",
+          video_model: videoModel,
+          image_model: imageModel,
+          tts_model: ttsModel,
+          ...(compareMode ? { video_model_variants: [videoModel, videoModelB] } : {}),
+          ...(ttsModel === "leapfast/indextts" ? {
+            tts_emotion: {
+              emo_alpha: emoAlpha,
+              use_emo_text: useEmoText,
+              ...(useEmoText && emoText ? { emo_text: emoText } : {}),
+              interval_silence: intervalSilence,
+            },
+          } : {}),
           ...(form.brandKitId ? { brand_kit_id: form.brandKitId } : {}),
           ...(form.budgetCny && Number(form.budgetCny) > 0
             ? { budget_cny: Number(form.budgetCny) }
@@ -211,6 +269,22 @@ export default function NewProjectPage() {
                 </button>
               )}
             </div>
+
+            {selectedKit?.reference_image_path && (
+              <div className="flex items-center gap-3 p-2 rounded-md border border-border bg-accent/40">
+                <img
+                  src={`${SERVER}/brand-media/${selectedKit.kit_id}/${selectedKit.reference_image_path}`}
+                  alt="品牌参考图"
+                  className="w-10 h-10 rounded object-cover border border-border shrink-0"
+                />
+                <p className="text-xs text-muted-foreground flex-1">
+                  已设置参考图，将用于保持角色/产品外观一致。
+                  <Link href="/dashboard/brands" className="underline hover:text-foreground ml-1">
+                    修改
+                  </Link>
+                </p>
+              </div>
+            )}
           </div>
         )}
 
@@ -244,6 +318,189 @@ export default function NewProjectPage() {
                 onChange={(e) => setForm(f => ({ ...f, slogan: e.target.value }))}
               />
             </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        <div className="space-y-4">
+          <h2 className="text-sm font-semibold text-foreground/70 uppercase tracking-wider">视频模型</h2>
+          <div className="space-y-3">
+            <div>
+              <label className="text-sm font-medium block mb-1.5">模型</label>
+              <div className="flex gap-2 flex-wrap">
+                {VIDEO_MODELS.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => {
+                      setVideoModel(m.id);
+                      if (compareMode && m.id === videoModelB) {
+                        setVideoModelB(otherVideoModel(m.id));
+                      }
+                    }}
+                    className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
+                      videoModel === m.id
+                        ? "bg-foreground text-background border-foreground"
+                        : "border-border hover:border-foreground/40"
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={compareMode}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setCompareMode(on);
+                  if (on && videoModelB === videoModel) {
+                    setVideoModelB(otherVideoModel(videoModel));
+                  }
+                }}
+                className="h-4 w-4 rounded border-border"
+              />
+              对比模式（每个镜头会用两个模型各生成一次，便于直接比较）
+            </label>
+
+            {compareMode && (
+              <div>
+                <label className="text-sm font-medium block mb-1.5">对比模型 B</label>
+                <div className="flex gap-2 flex-wrap">
+                  {VIDEO_MODELS.map((m) => {
+                    const disabled = m.id === videoModel;
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => setVideoModelB(m.id)}
+                        className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
+                          disabled
+                            ? "border-border/40 opacity-40 cursor-not-allowed"
+                            : videoModelB === m.id
+                              ? "bg-foreground text-background border-foreground"
+                              : "border-border hover:border-foreground/40"
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <Separator />
+
+        <div className="space-y-4">
+          <h2 className="text-sm font-semibold text-foreground/70 uppercase tracking-wider">图像模型</h2>
+          <div className="space-y-3">
+            <div>
+              <div className="flex gap-2 flex-wrap">
+                {IMAGE_MODELS.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setImageModel(m.id)}
+                    className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
+                      imageModel === m.id
+                        ? "bg-foreground text-background border-foreground"
+                        : "border-border hover:border-foreground/40"
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <Separator />
+
+        <div className="space-y-4">
+          <h2 className="text-sm font-semibold text-foreground/70 uppercase tracking-wider">语音模型</h2>
+          <div className="space-y-3">
+            <div>
+              <div className="flex gap-2 flex-wrap">
+                {TTS_MODELS.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setTtsModel(m.id)}
+                    className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
+                      ttsModel === m.id
+                        ? "bg-foreground text-background border-foreground"
+                        : "border-border hover:border-foreground/40"
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {ttsModel === "leapfast/indextts" && (
+              <div className="space-y-3 pt-1">
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">
+                    情绪强度 emo_alpha: {emoAlpha.toFixed(1)}
+                  </label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                    value={emoAlpha}
+                    onChange={(e) => setEmoAlpha(parseFloat(e.target.value))}
+                    className="w-full"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">0 = 平淡，1 = 情绪最强烈</p>
+                </div>
+
+                <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={useEmoText}
+                    onChange={(e) => setUseEmoText(e.target.checked)}
+                    className="h-4 w-4 rounded border-border"
+                  />
+                  使用情绪文字提示（emo_text）
+                </label>
+
+                {useEmoText && (
+                  <div>
+                    <Input
+                      placeholder="例：兴奋、低声细语、悲伤…"
+                      value={emoText}
+                      onChange={(e) => setEmoText(e.target.value)}
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">
+                    句间停顿 interval_silence: {intervalSilence}ms
+                  </label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="2000"
+                    step="50"
+                    value={intervalSilence}
+                    onChange={(e) => setIntervalSilence(parseInt(e.target.value, 10))}
+                    className="w-full"
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
