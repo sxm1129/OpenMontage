@@ -16,6 +16,7 @@ type BrandKit = {
   target_audience: string;
   logo_url: string;
   style_notes: string;
+  reference_image_path?: string;
   updated_at: number;
 };
 
@@ -27,6 +28,10 @@ export default function BrandsPage() {
   const [editing, setEditing] = useState<BrandKit | null>(null);
   const [form, setForm] = useState(emptyForm());
   const [saving, setSaving] = useState(false);
+  const [refImageFile, setRefImageFile] = useState<File | null>(null);
+  const [refImagePreview, setRefImagePreview] = useState<string | null>(null);
+  const [uploadingRefImage, setUploadingRefImage] = useState(false);
+  const [refImageError, setRefImageError] = useState<string | null>(null);
 
   function emptyForm() {
     return {
@@ -49,6 +54,9 @@ export default function BrandsPage() {
     setForm(emptyForm());
     setEditing(null);
     setCreating(true);
+    setRefImageFile(null);
+    setRefImagePreview(null);
+    setRefImageError(null);
   }
 
   function startEdit(kit: BrandKit) {
@@ -64,6 +72,34 @@ export default function BrandsPage() {
     });
     setEditing(kit);
     setCreating(true);
+    setRefImageFile(null);
+    setRefImagePreview(kit.reference_image_path ? `${SERVER}/brand-media/${kit.kit_id}/${kit.reference_image_path}` : null);
+    setRefImageError(null);
+  }
+
+  async function handleUploadReferenceImage() {
+    if (!editing || !refImageFile) return;
+    setUploadingRefImage(true);
+    setRefImageError(null);
+    try {
+      const body = new FormData();
+      body.append("file", refImageFile);
+      const res = await fetch(`${SERVER}/brands/${editing.kit_id}/reference-image`, {
+        method: "POST",
+        body,
+      });
+      if (!res.ok) {
+        setRefImageError("上传失败，请重试");
+        return;
+      }
+      const data = await res.json();
+      setRefImagePreview(`${SERVER}${data.reference_image_url}`);
+      setRefImageFile(null);
+    } catch {
+      setRefImageError("上传失败，请重试");
+    } finally {
+      setUploadingRefImage(false);
+    }
   }
 
   async function handleSave(e: React.FormEvent) {
@@ -129,9 +165,15 @@ export default function BrandsPage() {
                   <Input value={form.industry} onChange={(e) => setForm(f => ({ ...f, industry: e.target.value }))} placeholder="消费电子 / 快消 / 科技…" />
                 </div>
               </div>
-              <div>
-                <label className="text-sm font-medium block mb-1.5">Slogan</label>
-                <Input value={form.slogan} onChange={(e) => setForm(f => ({ ...f, slogan: e.target.value }))} placeholder="好咖啡，不只属于咖啡馆" />
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">Slogan</label>
+                  <Input value={form.slogan} onChange={(e) => setForm(f => ({ ...f, slogan: e.target.value }))} placeholder="好咖啡，不只属于咖啡馆" />
+                </div>
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">Logo URL</label>
+                  <Input value={form.logo_url} onChange={(e) => setForm(f => ({ ...f, logo_url: e.target.value }))} placeholder="https://…/logo.png" />
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -151,6 +193,35 @@ export default function BrandsPage() {
                 <label className="text-sm font-medium block mb-1.5">风格备注</label>
                 <Textarea rows={2} value={form.style_notes} onChange={(e) => setForm(f => ({ ...f, style_notes: e.target.value }))} placeholder="慢镜头、暖调、微距特写、无旁白…" />
               </div>
+              {editing && (
+                <div>
+                  <label className="text-sm font-medium block mb-1.5">参考图</label>
+                  <div className="flex items-center gap-3">
+                    {refImagePreview && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={refImagePreview} alt="参考图预览" className="w-24 h-24 object-cover rounded border border-border" />
+                    )}
+                    <div className="flex flex-col gap-2 items-start">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => setRefImageFile(e.target.files?.[0] ?? null)}
+                        className="text-xs"
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={!refImageFile || uploadingRefImage}
+                        onClick={handleUploadReferenceImage}
+                      >
+                        {uploadingRefImage ? "上传中…" : "上传参考图"}
+                      </Button>
+                      {refImageError && <p className="text-xs text-destructive">{refImageError}</p>}
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="flex gap-3 pt-2">
                 <Button type="submit" disabled={saving}>{saving ? "保存中…" : "保存"}</Button>
                 <Button type="button" variant="outline" onClick={() => { setCreating(false); setEditing(null); }}>取消</Button>
