@@ -63,6 +63,12 @@ async def job_events(job_id: str, lastEventId: int = -1):
                         "type": ev_type,
                         "ts": time.time(),
                         "render_url": job.get("render_url"),
+                        # Only present on a multi-variant (A/B) job — mirrors
+                        # the real job_completed/preview_ready events emitted
+                        # by stage_runner.py, so a client resuming mid-flight
+                        # (or after a server restart) sees the same shape a
+                        # live client would have.
+                        **({"render_urls": job["render_urls"]} if job.get("render_urls") else {}),
                         "message": "Job was interrupted (e.g. a server restart) before completion" if job.get("interrupted") else None,
                     }
                     yield f"id: {seq}\ndata: {json.dumps(synthetic, ensure_ascii=False)}\n\n"

@@ -177,6 +177,51 @@ def _load_brand_kit(kit_id: str | None) -> dict:
     return {}
 
 
+# The full data URI has to be replayed in EVERY turn's message history for
+# the rest of the stage (the agent has no other way to obtain it — read_file
+# reads text and would corrupt/fail on binary image bytes), so an
+# unbounded-size reference image would silently balloon token cost across up
+# to MAX_TURNS calls. The upload endpoint (routers/brands.py) resizes on
+# save specifically to stay well under this; this is a backstop for a kit.json
+# hand-edited or seeded outside that path.
+_MAX_REFERENCE_DATA_URI_CHARS = 400_000  # ~300KB image, comfortably below any turn budget
+
+
+def _brand_reference_image_data_uri(kit_id: str | None, kit: dict) -> str | None:
+    """Base64-encode the brand kit's reference image (if any) as a data URI.
+
+    Deliberately NOT a URL: MAAS_API_BASE is a remote gateway (api.aiapbot.com)
+    that cannot reach back into this box's localhost/LAN to fetch a
+    /brand-media/... path, even though the web UI can display that same URL
+    fine in the user's own browser. A data: URI is embedded directly in the
+    request body, so it works regardless of network reachability — this is
+    the same reason maas_video/maas_image's own image_to_video paths accept
+    image_base64 as an alternative to image_url.
+    """
+    rel = (kit or {}).get("reference_image_path")
+    if not kit_id or not rel:
+        return None
+    path = OM_ROOT / "brand_kits" / kit_id / rel
+    if not path.is_file():
+        return None
+    try:
+        import base64
+        ext = path.suffix.lstrip(".").lower() or "png"
+        mime = "jpeg" if ext in ("jpg", "jpeg") else ext
+        data = base64.b64encode(path.read_bytes()).decode()
+        uri = f"data:image/{mime};base64,{data}"
+    except OSError:
+        return None
+    if len(uri) > _MAX_REFERENCE_DATA_URI_CHARS:
+        # A truncated data URI isn't a smaller reference image, it's a
+        # corrupt one — silently returning it would have the agent copy
+        # broken base64 into a paid generation call. Skip it entirely
+        # instead; the brand kit's other fields still make it into the
+        # prompt as descriptive text.
+        return None
+    return uri
+
+
 def _run_agent_stage(
     job_id: str,
     stage_name: str,
@@ -203,12 +248,70 @@ def _run_agent_stage(
     )
 
     # Brand Kit injection — if a kit_id is in options, load and merge
-    brand_kit = _load_brand_kit(options.get("brand_kit_id"))
+    kit_id = options.get("brand_kit_id")
+    brand_kit = _load_brand_kit(kit_id)
     brand_section = ""
     if brand_kit:
         brand_section = f"""
 ## Brand Kit (use these to ensure visual/tonal consistency)
 {json.dumps(brand_kit, ensure_ascii=False, indent=2)[:2000]}
+"""
+        ref_data_uri = _brand_reference_image_data_uri(kit_id, brand_kit)
+        if ref_data_uri and stage_name == "assets":
+            # Only at "assets" (not every stage) — this is the one stage that
+            # actually calls image/video generation tools, and the full data
+            # URI is expensive enough (replayed in every turn's history for
+            # the rest of the stage) that it shouldn't be paid for at stages
+            # that can't use it. Called out as its own labeled section,
+            # separate from the JSON dump above, so it isn't easy to miss
+            # the way a field buried in a 2000-char blob would be.
+            brand_section += f"""
+## Brand Reference Image (for character/product consistency)
+This brand kit has a reference image. To keep a recurring character or
+product looking the same across every generated shot, pass EXACTLY the
+following data URI as `image_base64` (maas_video image_to_video/
+reference_to_video) or `input_image` (maas_image flux2 image-to-image) on
+every relevant call — do not describe the same subject freshly in text each
+time and hope for visual consistency; reuse this reference image instead.
+Copy the string below verbatim, in full — do not shorten or paraphrase it:
+
+{ref_data_uri}
+"""
+
+    # A/B variants — when options declares more than one model for a
+    # capability, the assets/compose stages must fan out across ALL of them
+    # (not just whichever one the agent would have picked on its own).
+    video_variants = [m for m in (options.get("video_model_variants") or []) if m]
+    variant_section = ""
+    if len(video_variants) > 1 and stage_name in ("assets", "compose"):
+        variant_list = ", ".join(f'"{m}"' for m in video_variants)
+        if stage_name == "assets":
+            variant_section = f"""
+## A/B Variants (REQUIRED — this job compares {len(video_variants)} video models)
+This job must produce EVERY generated video shot once per model below, not
+once total:
+{variant_list}
+For EACH shot in scene_plan, call `run_openmontage_tool` (maas_video) once
+per model in that list, passing that exact model string as `inputs.model`
+(calls with any other model will be rejected before they cost anything).
+Reuse the SAME reference image / prompt across a shot's variants — only the
+`model` should differ — so the comparison is apples-to-apples. Record each
+asset's `model` field accurately in asset_manifest so the compose stage can
+group them back into per-model cuts.
+"""
+        else:  # compose
+            variant_section = f"""
+## A/B Variants (REQUIRED — this job compares {len(video_variants)} video models)
+asset_manifest contains assets for {len(video_variants)} model variants
+({variant_list}), each tagged via its `model` field. Produce ONE fully
+composed render PER variant — do not merge them into a single cut. For each
+variant's `run_openmontage_tool` (video_compose, operation="compose" or
+"remotion_render") call:
+  - Use ONLY that variant's assets (filter asset_manifest by `model`).
+  - Pass `inputs.variant` set to that exact model string — this is what
+    keeps each variant's output file from overwriting the others (it maps
+    to a distinct renders/final_<slug>.mp4); omitting it on a multi-variant
+    job means only one variant's render survives.
 """
 
     # Tell the agent the manifest's real output name(s) explicitly, rather than
@@ -348,6 +451,7 @@ After writing the artifact, confirm briefly what you produced.
                     cost_tracker=cost_tracker,
                     budget_cny=budget_cny,
                     base_cost=base_cost,
+                    options=options,
                 )
             except BudgetExceededError:
                 # Hard budget stop — unwind the stage so the runner's event loop
@@ -627,9 +731,17 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         # they're actually waiting on. Surface it as soon as it exists.
         if stage_name == "compose":
             preview_url = _discover_render_url(project_dir, project_name)
+            preview_urls = _discover_render_urls(project_dir, project_name)
             if preview_url:
-                job_store.update(job_id, preview_render_url=preview_url)
-                _emit(job_id, {"type": "preview_ready", "render_url": preview_url})
+                update_kwargs: dict[str, Any] = {"preview_render_url": preview_url}
+                if preview_urls:
+                    update_kwargs["preview_render_urls"] = preview_urls
+                job_store.update(job_id, **update_kwargs)
+                _emit(job_id, {
+                    "type": "preview_ready",
+                    "render_url": preview_url,
+                    **({"render_urls": preview_urls} if preview_urls else {}),
+                })
 
         # Human approval gate — loop so repeated rejections each regenerate AND
         # re-present for approval (previously a rejected artifact silently passed).
@@ -699,9 +811,17 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
     # Prefer renders/, but fall back to any mp4 under assets/ (or a misnamed
     # .bin the compose tool may have produced) so the player still works.
     render_url = _discover_render_url(project_dir, project_name)
+    render_urls = _discover_render_urls(project_dir, project_name)
 
-    job_store.update(job_id, status="completed", render_url=render_url)
-    _emit(job_id, {"type": "job_completed", "render_url": render_url})
+    update_kwargs: dict[str, Any] = {"status": "completed", "render_url": render_url}
+    if render_urls:
+        update_kwargs["render_urls"] = render_urls
+    job_store.update(job_id, **update_kwargs)
+    _emit(job_id, {
+        "type": "job_completed",
+        "render_url": render_url,
+        **({"render_urls": render_urls} if render_urls else {}),
+    })
 
 
 def _discover_render_url(project_dir: Path, project_name: str) -> str | None:
@@ -731,6 +851,10 @@ def _discover_render_url(project_dir: Path, project_name: str) -> str | None:
 
     if candidate is None:
         return None
+    return _url_for_render(project_dir, project_name, candidate)
+
+
+def _url_for_render(project_dir: Path, project_name: str, candidate: Path) -> str:
     rel = candidate.relative_to(project_dir).as_posix()
     # Route through the storage seam so swapping to object storage later yields
     # signed URLs without touching this call site.
@@ -739,3 +863,24 @@ def _discover_render_url(project_dir: Path, project_name: str) -> str | None:
         return get_storage().url_for(project_name, rel)
     except Exception:
         return f"/media/{project_name}/{rel}"
+
+
+def _discover_render_urls(project_dir: Path, project_name: str) -> dict[str, str] | None:
+    """Variant-aware sibling of _discover_render_url.
+
+    An A/B job's compose stage produces renders/final_<slug>.mp4 per variant
+    (tool_bridge.py's `variant` output-path tagging) instead of a single
+    renders/final.mp4. Returns {variant_slug: url} for every renders/final*.mp4
+    found, or None for a normal (non-variant) job where only final.mp4 exists —
+    callers should keep using the singular render_url/preview_render_url in
+    that case, so a non-variant job's behavior is untouched.
+    """
+    renders = sorted((project_dir / "renders").glob("final*.mp4"))
+    if len(renders) <= 1:
+        return None  # 0 or 1 file: not a multi-variant job, nothing plural to report
+    urls: dict[str, str] = {}
+    for path in renders:
+        stem = path.stem  # "final_ltx2-3" -> "ltx2-3"; bare "final" -> ""
+        slug = stem[len("final"):].lstrip("_") or "default"
+        urls[slug] = _url_for_render(project_dir, project_name, path)
+    return urls

@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 from app.runner import stage_runner
 from app.runner.stage_runner import (
-    _discover_render_url, _load_artifacts, _load_brand_kit,
+    _discover_render_url, _discover_render_urls, _load_artifacts, _load_brand_kit,
+    _brand_reference_image_data_uri, _MAX_REFERENCE_DATA_URI_CHARS,
 )
 
 
@@ -57,6 +58,85 @@ def test_discover_none_when_empty(tmp_path):
     proj = tmp_path / "p"
     proj.mkdir()
     assert _discover_render_url(proj, "p") is None
+
+
+# ── _discover_render_urls (A/B variant-aware) ────────────────────────────────
+
+def test_discover_render_urls_none_for_single_render(tmp_path):
+    # A normal (non-variant) job — only the plain final.mp4 exists. Callers
+    # must fall back to the singular render_url in this case, so this needs
+    # to return None, not a one-entry dict.
+    proj = tmp_path / "p"
+    (proj / "renders").mkdir(parents=True)
+    (proj / "renders" / "final.mp4").write_bytes(b"x")
+    assert _discover_render_urls(proj, "p") is None
+
+
+def test_discover_render_urls_none_when_empty(tmp_path):
+    proj = tmp_path / "p"
+    proj.mkdir()
+    assert _discover_render_urls(proj, "p") is None
+
+
+def test_discover_render_urls_maps_each_variant(tmp_path):
+    proj = tmp_path / "p"
+    (proj / "renders").mkdir(parents=True)
+    (proj / "renders" / "final_ltx-2-3.mp4").write_bytes(b"x")
+    (proj / "renders" / "final_wan2-2.mp4").write_bytes(b"y")
+    urls = _discover_render_urls(proj, "p")
+    assert urls == {
+        "ltx-2-3": "/media/p/renders/final_ltx-2-3.mp4",
+        "wan2-2": "/media/p/renders/final_wan2-2.mp4",
+    }
+
+
+def test_discover_render_urls_bare_final_gets_default_slug_alongside_variant(tmp_path):
+    # Edge case: a bare final.mp4 sitting next to a variant-tagged one (e.g.
+    # a job that only tagged the SECOND compose call). Both must surface.
+    proj = tmp_path / "p"
+    (proj / "renders").mkdir(parents=True)
+    (proj / "renders" / "final.mp4").write_bytes(b"x")
+    (proj / "renders" / "final_wan2-2.mp4").write_bytes(b"y")
+    urls = _discover_render_urls(proj, "p")
+    assert urls == {
+        "default": "/media/p/renders/final.mp4",
+        "wan2-2": "/media/p/renders/final_wan2-2.mp4",
+    }
+
+
+# ── _brand_reference_image_data_uri ──────────────────────────────────────────
+
+def test_brand_reference_image_data_uri_absent_without_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(stage_runner, "OM_ROOT", tmp_path)
+    assert _brand_reference_image_data_uri("some-kit", {}) is None
+    assert _brand_reference_image_data_uri(None, {"reference_image_path": "reference.png"}) is None
+
+
+def test_brand_reference_image_data_uri_reads_and_encodes(tmp_path, monkeypatch):
+    monkeypatch.setattr(stage_runner, "OM_ROOT", tmp_path)
+    kit_dir = tmp_path / "brand_kits" / "acme-123"
+    kit_dir.mkdir(parents=True)
+    (kit_dir / "reference.png").write_bytes(b"\x89PNG\r\n\x1a\nfake-but-nonempty")
+    uri = _brand_reference_image_data_uri("acme-123", {"reference_image_path": "reference.png"})
+    assert uri is not None
+    assert uri.startswith("data:image/png;base64,")
+
+
+def test_brand_reference_image_data_uri_skips_oversized_file_instead_of_truncating(tmp_path, monkeypatch):
+    # A truncated data URI isn't a smaller image, it's corrupt — must be
+    # skipped entirely (None) rather than handed to the agent half-cut.
+    monkeypatch.setattr(stage_runner, "OM_ROOT", tmp_path)
+    kit_dir = tmp_path / "brand_kits" / "acme-123"
+    kit_dir.mkdir(parents=True)
+    # base64 expands ~4/3x — this comfortably exceeds the char cap.
+    (kit_dir / "reference.png").write_bytes(b"x" * (_MAX_REFERENCE_DATA_URI_CHARS))
+    uri = _brand_reference_image_data_uri("acme-123", {"reference_image_path": "reference.png"})
+    assert uri is None
+
+
+def test_brand_reference_image_data_uri_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(stage_runner, "OM_ROOT", tmp_path)
+    assert _brand_reference_image_data_uri("acme-123", {"reference_image_path": "reference.png"}) is None
 
 
 # ── artifact / brand-kit loading ─────────────────────────────────────────────

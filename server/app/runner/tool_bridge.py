@@ -109,6 +109,103 @@ TOOL_SCHEMAS = [
 ]
 
 
+# Maps the job-level "which capability does this option name constrain"
+# relationship: options[<key>] / options[<variants_key>] binds tool_name's
+# `inputs["model"]`. Extend this if another capability gets a wizard-level
+# model choice (e.g. music) — everything else about the enforcement below is
+# generic over this table.
+_MODEL_ENFORCED_TOOLS: dict[str, dict[str, str]] = {
+    "maas_video": {"default_key": "video_model", "variants_key": "video_model_variants"},
+    "maas_image": {"default_key": "image_model", "variants_key": "image_model_variants"},
+    "maas_tts":   {"default_key": "tts_model",   "variants_key": "tts_model_variants"},
+}
+
+
+def variant_slug(model_or_variant: str) -> str:
+    """Turn a model ID ("leapfast/ltx-2.3") or an already-short variant tag
+    ("ltx") into a filesystem-safe slug ("ltx2-3" / "ltx"). Used to keep
+    per-variant output files distinguishable (final_ltx.mp4 vs
+    final_wan.mp4) instead of an opaque random suffix that tells a human
+    nothing about which A/B branch produced which file."""
+    tail = model_or_variant.rsplit("/", 1)[-1]
+    slug = "".join(c if c.isalnum() else "-" for c in tail.lower()).strip("-")
+    return slug or "default"
+
+
+def _enforce_model_choice(tool_name: str, inputs: dict[str, Any], options: dict[str, Any] | None) -> str | None:
+    """Fill in or validate inputs["model"] against the job's options.
+
+    Returns None if the call may proceed (inputs mutated in place when a
+    default was filled in), or an error string if the agent must be told to
+    retry with a different model — before any paid API call is made.
+
+    Without this, the wizard's model choice (or an A/B variants list) was
+    purely descriptive text in the prompt (`## Options: {...}`) — the agent
+    was free to call any model regardless of what the user selected. That
+    made "pick a model in the UI" cosmetic: the dropdown could say
+    leapfast/wan2.2 while the agent quietly kept generating with whatever it
+    defaulted to.
+    """
+    if not options:
+        return None
+    cfg = _MODEL_ENFORCED_TOOLS.get(tool_name)
+    if not cfg:
+        return None
+
+    variants = options.get(cfg["variants_key"])
+    allowed = [m for m in variants if m] if isinstance(variants, list) and variants else None
+    default = options.get(cfg["default_key"]) or None
+
+    if not allowed and not default:
+        return None  # job didn't constrain this capability at all
+
+    requested = inputs.get("model")
+    if not requested:
+        # Fill in rather than reject — the common case (no variants) should
+        # just work without the agent having to echo the option back.
+        inputs["model"] = (allowed[0] if allowed else default)
+        return None
+
+    permitted = allowed or [default]
+    if requested in permitted:
+        return None
+
+    return (
+        f"ERROR: model {requested!r} is not permitted for this job's {cfg['default_key']} "
+        f"setting. This job is constrained to: {permitted}. "
+        f"Retry {tool_name} with model set to one of those — do not substitute a different "
+        f"one even if you believe it fits the prompt better; the user chose this in the wizard."
+    )
+
+
+_TTS_EMOTION_KEYS = ("emo_alpha", "use_emo_text", "emo_text", "interval_silence")
+
+
+def _apply_tts_emotion_defaults(inputs: dict[str, Any], options: dict[str, Any] | None) -> None:
+    """Fill in maas_tts's IndexTTS V3 emotion params (options["tts_emotion"])
+    when the agent's call didn't set them explicitly.
+
+    Without this, the wizard's emotion controls were purely descriptive —
+    nothing read them, so picking an emotion in the UI had zero effect unless
+    the agent happened to independently choose the same values. Unlike
+    _enforce_model_choice, this only fills gaps rather than rejecting a
+    mismatch: there's no "wrong" emotion value to block, only a default that
+    should apply when the agent didn't think to set one, while still letting
+    it deliberately vary emotion per line/scene if it wants to.
+
+    emo_alpha=0.0 is a valid, meaningful value (flat delivery) — checked via
+    `key in defaults`, not truthiness, so it isn't mistaken for "unset".
+    """
+    if not options:
+        return
+    defaults = options.get("tts_emotion")
+    if not isinstance(defaults, dict):
+        return
+    for key in _TTS_EMOTION_KEYS:
+        if key in defaults and key not in inputs:
+            inputs[key] = defaults[key]
+
+
 def execute_tool(
     name: str,
     args: dict[str, Any],
@@ -118,6 +215,7 @@ def execute_tool(
     cost_tracker: Any = None,  # optional tools.cost_tracker.CostTracker ledger
     budget_cny: float | None = None,  # per-job CNY ceiling (None = no gate)
     base_cost: float = 0.0,           # cost already spent before this run (retries)
+    options: dict[str, Any] | None = None,  # job-level options (model choices, variants)
 ) -> str:
     """Execute a tool call and return a string result for the agent."""
 
@@ -167,6 +265,22 @@ def execute_tool(
         if not tool:
             return f"ERROR: Tool '{tool_name}' not found in registry"
 
+        enforcement_error = _enforce_model_choice(tool_name, inputs, options)
+        if enforcement_error:
+            return enforcement_error
+
+        if tool_name == "maas_tts":
+            _apply_tts_emotion_defaults(inputs, options)
+
+        # A caller doing an A/B variants run (options[...variants_key] set)
+        # tags which branch a call belongs to — either explicitly via
+        # inputs["variant"] (the only way compose/video_post calls can say
+        # this, since they have no "model" of their own) or implicitly via
+        # inputs["model"] for generation calls. Popped before the tool sees
+        # `inputs` — it's a routing hint, not a tool parameter.
+        variant = inputs.pop("variant", None) or inputs.get("model")
+        variant_tag = f"_{variant_slug(variant)}" if variant else ""
+
         # Set output path if not specified.
         if "output_path" not in inputs:
             ext_map = {
@@ -189,7 +303,14 @@ def execute_tool(
             if is_final_compose:
                 renders_dir = project_dir / "renders"
                 renders_dir.mkdir(parents=True, exist_ok=True)
-                inputs = {**inputs, "output_path": str(renders_dir / "final.mp4")}
+                # Plain "final.mp4" for the common single-render case (kept
+                # byte-for-byte compatible with every existing job/URL that
+                # already assumes this name). An A/B run doing N independent
+                # compose calls needs the variant folded into the filename —
+                # otherwise the second call's "final.mp4" silently clobbers
+                # the first's, and only one variant would ever be watchable.
+                filename = f"final{variant_tag}.mp4" if variant_tag else "final.mp4"
+                inputs = {**inputs, "output_path": str(renders_dir / filename)}
             else:
                 out_dir = project_dir / "assets" / tool.capability
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -200,9 +321,11 @@ def execute_tool(
                 # overriding output_path) left exactly ONE file on disk,
                 # since each call clobbered the last. A short random suffix
                 # gives every call — with or without a distinguishing
-                # prompt/parameter — its own file.
+                # prompt/parameter — its own file. The variant tag (when
+                # present) makes the filename tell a human which A/B branch
+                # it belongs to, instead of being opaque.
                 unique = uuid.uuid4().hex[:8]
-                inputs = {**inputs, "output_path": str(out_dir / f"{tool_name}_{unique}.{ext}")}
+                inputs = {**inputs, "output_path": str(out_dir / f"{tool_name}{variant_tag}_{unique}.{ext}")}
 
         # Hard budget ceiling — pre-call check. Bounds total spend to <= budget
         # by refusing a paid call that would cross it, instead of letting a

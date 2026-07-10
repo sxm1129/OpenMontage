@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from app.runner.tool_bridge import execute_tool, BudgetExceededError
+from app.runner.tool_bridge import execute_tool, BudgetExceededError, variant_slug
 
 
 class _FakeResult:
@@ -130,6 +130,183 @@ def test_no_budget_runs_freely(tmp_path, monkeypatch):
     acc = []
     _run_tool(tmp_path, tool, monkeypatch, cost_accumulator=acc, budget_cny=None, base_cost=0.0)
     assert acc == [5.0]
+
+
+def test_variant_slug_from_model_id():
+    assert variant_slug("leapfast/ltx-2.3") == "ltx-2-3"
+    assert variant_slug("leapfast/wan2.2") == "wan2-2"
+    assert variant_slug("ltx") == "ltx"
+    assert variant_slug("") == "default"
+
+
+def test_model_choice_filled_in_when_agent_omits_it(tmp_path, monkeypatch):
+    tool = FakeTool(capability="video_generation")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_video", "inputs": {"prompt": "x"}},
+        tmp_path,
+        options={"video_model": "leapfast/ltx-2.3"},
+    )
+    assert tool.executed_with["model"] == "leapfast/ltx-2.3"
+
+
+def test_model_choice_rejects_mismatch_before_calling_tool(tmp_path, monkeypatch):
+    tool = FakeTool(capability="video_generation")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    out = execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_video", "inputs": {"prompt": "x", "model": "volcengine/doubao-seedance-2.0"}},
+        tmp_path,
+        options={"video_model": "leapfast/ltx-2.3"},
+    )
+    assert "ERROR" in out
+    assert "leapfast/ltx-2.3" in out
+    assert tool.executed_with is None  # rejected before the (paid) call
+
+
+def test_model_choice_allows_any_listed_variant(tmp_path, monkeypatch):
+    tool = FakeTool(capability="video_generation")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    for model in ("leapfast/ltx-2.3", "leapfast/wan2.2"):
+        execute_tool(
+            "run_openmontage_tool",
+            {"tool_name": "maas_video", "inputs": {"prompt": "x", "model": model}},
+            tmp_path,
+            options={"video_model_variants": ["leapfast/ltx-2.3", "leapfast/wan2.2"]},
+        )
+        assert tool.executed_with["model"] == model
+
+
+def test_unconstrained_job_options_dont_touch_model(tmp_path, monkeypatch):
+    tool = FakeTool(capability="video_generation")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_video", "inputs": {"prompt": "x", "model": "anything-the-agent-picked"}},
+        tmp_path,
+        options={},
+    )
+    assert tool.executed_with["model"] == "anything-the-agent-picked"
+
+
+def test_variant_tag_keeps_asset_output_paths_distinguishable(tmp_path, monkeypatch):
+    tool = FakeTool(capability="video_generation")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_video", "inputs": {"prompt": "x", "model": "leapfast/wan2.2"}},
+        tmp_path,
+    )
+    assert "_wan2-2_" in tool.executed_with["output_path"]
+
+
+def test_compose_variant_tag_produces_distinct_render_filenames(tmp_path, monkeypatch):
+    tool = FakeTool(capability="video_post")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+
+    execute_tool("run_openmontage_tool",
+                 {"tool_name": "video_compose", "inputs": {"operation": "compose", "variant": "leapfast/ltx-2.3"}},
+                 tmp_path)
+    ltx_path = tool.executed_with["output_path"]
+
+    execute_tool("run_openmontage_tool",
+                 {"tool_name": "video_compose", "inputs": {"operation": "compose", "variant": "leapfast/wan2.2"}},
+                 tmp_path)
+    wan_path = tool.executed_with["output_path"]
+
+    assert ltx_path != wan_path
+    assert ltx_path.endswith("/renders/final_ltx-2-3.mp4")
+    assert wan_path.endswith("/renders/final_wan2-2.mp4")
+    assert "variant" not in tool.executed_with  # popped — not a real tool param
+
+
+def test_tts_emotion_defaults_filled_when_agent_omits(tmp_path, monkeypatch):
+    tool = FakeTool(capability="tts")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_tts", "inputs": {"text": "hi"}},
+        tmp_path,
+        options={"tts_emotion": {
+            "emo_alpha": 0.6, "use_emo_text": True, "emo_text": "excited", "interval_silence": 300,
+        }},
+    )
+    assert tool.executed_with["emo_alpha"] == 0.6
+    assert tool.executed_with["use_emo_text"] is True
+    assert tool.executed_with["emo_text"] == "excited"
+    assert tool.executed_with["interval_silence"] == 300
+
+
+def test_tts_emotion_defaults_zero_alpha_is_applied_not_treated_as_unset(tmp_path, monkeypatch):
+    # Regression guard: emo_alpha=0.0 (flat delivery) is a real, meaningful
+    # value — a truthiness check would silently drop it.
+    tool = FakeTool(capability="tts")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_tts", "inputs": {"text": "hi"}},
+        tmp_path,
+        options={"tts_emotion": {"emo_alpha": 0.0}},
+    )
+    assert tool.executed_with["emo_alpha"] == 0.0
+
+
+def test_tts_emotion_defaults_respect_agent_override(tmp_path, monkeypatch):
+    tool = FakeTool(capability="tts")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_tts", "inputs": {"text": "hi", "emo_alpha": 0.9}},
+        tmp_path,
+        options={"tts_emotion": {"emo_alpha": 0.2}},
+    )
+    assert tool.executed_with["emo_alpha"] == 0.9
+
+
+def test_tts_emotion_defaults_ignored_for_other_tools(tmp_path, monkeypatch):
+    tool = FakeTool(capability="video_generation")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_video", "inputs": {"prompt": "x"}},
+        tmp_path,
+        options={"tts_emotion": {"emo_alpha": 0.2}},
+    )
+    assert "emo_alpha" not in tool.executed_with
+
+
+def test_tts_emotion_defaults_no_op_without_options(tmp_path, monkeypatch):
+    tool = FakeTool(capability="tts")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_tts", "inputs": {"text": "hi"}},
+        tmp_path,
+    )
+    assert "emo_alpha" not in tool.executed_with
 
 
 def test_cost_tracker_ledger_records(tmp_path, monkeypatch):
