@@ -18,7 +18,16 @@ function resolveAsset(src: string): string {
     return src;
   }
   const clean = src.replace(/^file:\/\/\/?/, "");
-  if (clean.startsWith("/") || /^[A-Za-z]:[/\\]/.test(clean)) {
+  // POSIX absolute paths already carry their own leading slash ("/Users/...") —
+  // prepending another "file:///" produces an invalid 4-slash URI
+  // ("file:////Users/...") that Remotion's asset downloader rejects outright
+  // ("Can only download URLs starting with http:// or https://"). Only
+  // Windows drive-letter paths ("C:/...") need the extra slash. Mirrors the
+  // equivalent POSIX-vs-Windows branch in video_compose.py's _remotion_render.
+  if (clean.startsWith("/")) {
+    return `file://${clean.replace(/\\/g, "/")}`;
+  }
+  if (/^[A-Za-z]:[/\\]/.test(clean)) {
     return `file:///${clean.replace(/\\/g, "/")}`;
   }
   return staticFile(clean);
@@ -253,7 +262,10 @@ const TitleCard: React.FC<{
     >
       {backgroundSrc ? (
         <>
-          <AbsoluteFill style={{ transform: `scale(${bgScale})`, opacity: 0.62 }}>
+          {/* Gentle spring fade-in for the background image/video, rather
+              than snapping straight to its resting 0.62 opacity. Reuses the
+              `container` spring already computed above for the accent dot. */}
+          <AbsoluteFill style={{ transform: `scale(${bgScale})`, opacity: 0.62 * container }}>
             <OffthreadVideo
               muted
               src={resolveAsset(backgroundSrc)}
