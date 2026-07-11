@@ -209,6 +209,152 @@ def test_no_tool_calls_ends_stage(tmp_path, monkeypatch):
     assert not (tmp_path / "artifacts").exists()  # no tool ran
 
 
+# ── mid-stage stall nudging (agent stops to ask, artifact not written) ──────
+
+def test_nudge_agent_to_continue_when_artifact_missing(tmp_path, monkeypatch):
+    # Regression: confirmed live — asset-director.md's own "Sample Preview"
+    # step tells the agent to generate one sample of each asset type and
+    # confirm with the user before batch-generating the rest. In an
+    # unattended pipeline run there's no human to answer, and a retry starts
+    # a brand-new conversation from scratch — so ending the stage here would
+    # discard the (paid-for) samples and regenerate identical ones forever.
+    turn1 = _resp(
+        "Here are samples of each asset — please confirm before I continue.",
+        None, "stop",
+    )
+    turn2 = _resp(
+        "writing",
+        [_tool_call("c1", "write_artifact",
+                    '{"artifact_name": "asset_manifest", "content": {"ok": true}}')],
+        "stop",
+    )
+    turn3 = _resp("done", None, "stop")
+    responses = iter([turn1, turn2, turn3])
+    captured = {}
+    def fake_create(**kw):
+        captured["messages"] = kw["messages"]
+        return next(responses)
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    ok = stage_runner._run_agent_stage(
+        "job-nudge1", "assets", "skill", tmp_path, {}, {}, produces=["asset_manifest"],
+    )
+    assert ok is True
+    assert (tmp_path / "artifacts" / "asset_manifest.json").exists()
+    nudge_msgs = [m["content"] for m in captured["messages"] if m.get("role") == "user"][1:]
+    assert nudge_msgs
+    assert "no human is available" in nudge_msgs[0].lower()
+
+
+def test_no_nudge_when_artifact_already_written(tmp_path, monkeypatch):
+    # A text-only turn AFTER the artifact already exists is genuine
+    # completion (the prompt itself asks for a brief confirmation once
+    # done) — must return immediately, not waste a nudge.
+    (tmp_path / "artifacts").mkdir()
+    (tmp_path / "artifacts" / "asset_manifest.json").write_text('{"ok": true}')
+    resp = _resp("All done, produced the asset manifest above.", None, "stop")
+    captured = {}
+    def fake_create(**kw):
+        captured["messages"] = kw["messages"]
+        return resp
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    ok = stage_runner._run_agent_stage(
+        "job-nudge2", "assets", "skill", tmp_path, {}, {}, produces=["asset_manifest"],
+    )
+    assert ok is True
+    # Only the original prompt — no nudge appended.
+    user_msgs = [m for m in captured["messages"] if m.get("role") == "user"]
+    assert len(user_msgs) == 1
+
+
+def test_nudge_budget_exhausted_still_ends_stage(tmp_path, monkeypatch):
+    # A genuinely stuck agent (never writes the artifact even after being
+    # nudged) must still stop within a small, bounded number of extra turns —
+    # not loop for the entire MAX_TURNS budget.
+    stall = _resp("Still need confirmation before I continue.", None, "stop")
+    call_count = {"n": 0}
+    def fake_create(**kw):
+        call_count["n"] += 1
+        return stall
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    ok = stage_runner._run_agent_stage(
+        "job-nudge3", "assets", "skill", tmp_path, {}, {}, produces=["asset_manifest"],
+    )
+    assert ok is True
+    assert not (tmp_path / "artifacts").exists()
+    # One initial call + MAX_AUTONOMY_NUDGES retries, no more.
+    assert call_count["n"] == stage_runner.MAX_AUTONOMY_NUDGES + 1
+
+
+# ── truncated tool-call arguments: finish_reason-aware diagnosis ────────────
+
+def test_truncated_args_length_limit_gives_shorten_hint(tmp_path, monkeypatch):
+    # finish_reason="length" means the shared narration+JSON budget really was
+    # exhausted — the agent should be told to write less next time.
+    turn1 = _resp(
+        "writing",
+        [_tool_call("c1", "write_artifact", '{"artifact_name": "scene_pla')],  # cut off mid-string
+        "length",
+    )
+    turn2 = _resp("done", None, "stop")
+    responses = iter([turn1, turn2])
+    captured = {}
+    def fake_create(**kw):
+        captured["messages"] = kw["messages"]
+        return next(responses)
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    stage_runner._run_agent_stage("job-len", "scene_plan", "skill", tmp_path, {}, {})
+
+    tool_msgs = [m["content"] for m in captured["messages"] if m.get("role") == "tool"]
+    assert tool_msgs
+    assert "finish_reason=length" in tool_msgs[0]
+    assert "more concise" in tool_msgs[0]
+
+
+def test_truncated_args_non_length_gives_malformed_hint(tmp_path, monkeypatch):
+    # A non-"length" finish_reason with unparsable JSON is a different failure
+    # (a genuinely malformed call) — telling the agent to "write less" would
+    # be misleading advice when the visible content wasn't actually large.
+    turn1 = _resp(
+        "writing",
+        [_tool_call("c1", "write_artifact", '{"artifact_name": "scene_pla')],
+        "stop",
+    )
+    turn2 = _resp("done", None, "stop")
+    responses = iter([turn1, turn2])
+    captured = {}
+    def fake_create(**kw):
+        captured["messages"] = kw["messages"]
+        return next(responses)
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    stage_runner._run_agent_stage("job-malformed", "scene_plan", "skill", tmp_path, {}, {})
+
+    tool_msgs = [m["content"] for m in captured["messages"] if m.get("role") == "tool"]
+    assert tool_msgs
+    assert "finish_reason=stop" in tool_msgs[0]
+    assert "wasn't a length limit" in tool_msgs[0]
+    assert "more concise" not in tool_msgs[0]
+
+
+def test_llm_call_uses_generous_max_tokens(tmp_path, monkeypatch):
+    # Regression: 8192 shared between narration and a large write_artifact
+    # payload (e.g. a multi-clip scene_plan) could exhaust the budget before
+    # the JSON finished, truncating arguments to just a few characters.
+    resp = _resp("done", None, "stop")
+    captured = {}
+    def fake_create(**kw):
+        captured.update(kw)
+        return resp
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    stage_runner._run_agent_stage("job-budget", "scene_plan", "skill", tmp_path, {}, {})
+    assert captured["max_tokens"] >= 16384
+
+
 def test_tool_keyerror_reports_missing_parameter_not_bare_repr(tmp_path, monkeypatch):
     # Regression: a tool indexing inputs["some_field"] with no fallback raises
     # a bare KeyError, which str()s to just "'some_field'" — cryptic enough
@@ -243,6 +389,84 @@ def test_tool_keyerror_reports_missing_parameter_not_bare_repr(tmp_path, monkeyp
     assert "operation" in tool_result_msgs[0]
     # The bare, uninterpretable KeyError repr must NOT be the whole message.
     assert tool_result_msgs[0] != "ERROR: Tool execution failed: 'operation'"
+
+
+# ── tool_call event summary (progress-log clarity) ───────────────────────────
+
+def test_tool_call_summary_shows_path_not_param_names(tmp_path, monkeypatch):
+    # Regression: the summary used to be f"{tool_name}({list(tool_args.keys())})"
+    # — literally the parameter NAMES, so every read_file call rendered the
+    # identical "read_file(['path'])" in the progress log regardless of which
+    # file was actually read.
+    turn1 = _resp(
+        "reading",
+        [_tool_call("c1", "read_file", '{"path": "skills/meta/foo.md"}')],
+        "stop",
+    )
+    turn2 = _resp("done", None, "stop")
+    responses = iter([turn1, turn2])
+    monkeypatch.setattr(
+        stage_runner.llm.chat.completions, "create", lambda **kw: next(responses),
+    )
+    (tmp_path / "skills" / "meta").mkdir(parents=True)
+    (tmp_path / "skills" / "meta" / "foo.md").write_text("hi")
+    monkeypatch.setattr(stage_runner, "OM_ROOT", tmp_path)
+
+    events = []
+    monkeypatch.setattr(stage_runner, "_emit", lambda job_id, ev: events.append(ev))
+
+    stage_runner._run_agent_stage("job-t1", "idea", "skill", tmp_path, {}, {})
+
+    tool_call_events = [e for e in events if e["type"] == "tool_call"]
+    assert tool_call_events
+    assert tool_call_events[0]["summary"] == "read_file(skills/meta/foo.md)"
+
+
+def test_tool_call_summary_shows_artifact_name(tmp_path, monkeypatch):
+    turn1 = _resp(
+        "writing",
+        [_tool_call("c1", "write_artifact",
+                    '{"artifact_name": "brief", "content": {"a": 1}}')],
+        "stop",
+    )
+    turn2 = _resp("done", None, "stop")
+    responses = iter([turn1, turn2])
+    monkeypatch.setattr(
+        stage_runner.llm.chat.completions, "create", lambda **kw: next(responses),
+    )
+
+    events = []
+    monkeypatch.setattr(stage_runner, "_emit", lambda job_id, ev: events.append(ev))
+
+    stage_runner._run_agent_stage("job-t2", "idea", "skill", tmp_path, {}, {})
+
+    tool_call_events = [e for e in events if e["type"] == "tool_call"]
+    assert tool_call_events
+    assert tool_call_events[0]["summary"] == "write_artifact(brief)"
+
+
+def test_tool_call_summary_shows_target_tool_name(tmp_path, monkeypatch):
+    turn1 = _resp(
+        "generating",
+        [_tool_call("c1", "run_openmontage_tool",
+                    '{"tool_name": "maas_video", "inputs": {"prompt": "x"}}')],
+        "stop",
+    )
+    turn2 = _resp("done", None, "stop")
+    responses = iter([turn1, turn2])
+    monkeypatch.setattr(
+        stage_runner.llm.chat.completions, "create", lambda **kw: next(responses),
+    )
+    monkeypatch.setattr(stage_runner, "execute_tool", lambda *a, **k: '{"success": true}')
+
+    events = []
+    monkeypatch.setattr(stage_runner, "_emit", lambda job_id, ev: events.append(ev))
+
+    stage_runner._run_agent_stage("job-t3", "assets", "skill", tmp_path, {}, {})
+
+    tool_call_events = [e for e in events if e["type"] == "tool_call"]
+    assert tool_call_events
+    assert tool_call_events[0]["summary"] == "run_openmontage_tool(maas_video)"
 
 
 def test_prompt_tells_agent_the_produces_name(tmp_path, monkeypatch):

@@ -52,7 +52,13 @@ async def test_skill_less_stage_does_not_crash(runner, monkeypatch):
     assert "director" in seen_skill_text[0]   # placeholder fallback text used
 
 
-async def test_happy_path_completes(runner, monkeypatch):
+async def test_happy_path_completes(runner, monkeypatch, tmp_path):
+    # A genuinely completed compose stage must be backed by a real render
+    # file (see test_compose_fails_without_a_real_render_file below) — create
+    # one so this test represents an honest success, not the fabricated-report
+    # case.
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
     monkeypatch.setattr(stage_runner, "_run_agent_stage", lambda *a, **k: True)
     runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
 
@@ -64,7 +70,9 @@ async def test_happy_path_completes(runner, monkeypatch):
     assert "job_completed" in _events(runner, "j")
 
 
-async def test_resume_skips_completed_stages(runner, monkeypatch):
+async def test_resume_skips_completed_stages(runner, monkeypatch, tmp_path):
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
     ran = []
     monkeypatch.setattr(stage_runner, "_run_agent_stage",
                         lambda *a, **k: ran.append(a[1]) or True)  # a[1] = stage_name
@@ -76,6 +84,25 @@ async def test_resume_skips_completed_stages(runner, monkeypatch):
     assert ran == ["compose"]                    # research skipped, only compose ran
     assert "stage_skipped" in _events(runner, "j")
     assert runner.get("j")["status"] == "completed"
+
+
+async def test_compose_fails_without_a_real_render_file(runner, monkeypatch):
+    # Confirmed live: an agent that hit a video_compose failure fabricated a
+    # plausible-looking render_report (invented file paths under a DIFFERENT
+    # project name, invented file sizes, an invented render duration) instead
+    # of retrying or reporting the failure honestly — and the job showed as
+    # "completed" with zero actual deliverable. Writing render_report/
+    # final_review must not be enough; a real file under renders/ is required.
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", lambda *a, **k: True)
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    job = runner.get("j")
+    assert job["status"] == "failed"
+    assert "compose" not in job["completed_stages"]
+    failed = [e for e in runner.get_events("j", after_seq=-1) if e["type"] == "job_failed"]
+    assert failed and "no actual render file exists" in failed[-1]["message"]
 
 
 async def test_unhandled_error_marks_failed(runner, monkeypatch):
@@ -137,12 +164,14 @@ async def test_required_artifact_present_proceeds(runner, monkeypatch, tmp_path)
     assert runner.get("j")["status"] == "completed"
 
 
-async def test_concurrent_run_for_same_job_id_is_a_noop(runner, monkeypatch):
+async def test_concurrent_run_for_same_job_id_is_a_noop(runner, monkeypatch, tmp_path):
     # Regression: two overlapping run_pipeline_job calls for the same job_id
     # (e.g. a retry racing an already-live run) used to both drive the
     # pipeline concurrently — two LLM sessions writing artifacts for the same
     # project, clobbering each other. The in-process _ACTIVE_JOB_IDS guard
     # must make the second call an immediate no-op.
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
     calls = []
     def slow_stage(*a, **k):
         calls.append(1)
@@ -327,8 +356,10 @@ async def test_reject_retry_still_receives_budget_ceiling(runner, monkeypatch):
     assert runner.get("j")["status"] == "completed"
 
 
-async def test_budget_gate_pauses_then_resumes_on_approve(runner, monkeypatch):
+async def test_budget_gate_pauses_then_resumes_on_approve(runner, monkeypatch, tmp_path):
     # Each stage "spends" 5 CNY against a 1 CNY budget → gate must pause.
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
     def spend(*a, **k):
         acc = a[7]              # cost_accumulator positional arg
         if acc is not None:

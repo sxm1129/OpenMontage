@@ -115,6 +115,17 @@ def _resolve_stages(pipeline_name: str) -> list[dict]:
     return CINEMATIC_STAGES
 
 MAX_TURNS  = 20
+# How many times _run_agent_stage will nudge an agent that stops mid-stage
+# (text-only turn, no tool_calls) before its declared artifact exists. Some
+# director skills explicitly instruct a check-in before proceeding (e.g.
+# asset-director.md's "Sample Preview" step asks the user to confirm before
+# batch-generating) — reasonable for an interactive session, but this
+# pipeline runs unattended and a job retry starts a brand-new conversation
+# from scratch, so it can't ever deliver that confirmation; without a nudge
+# the stage (and the paid samples it already generated) would just be
+# discarded and regenerated identically on every retry. Bounded so a truly
+# stuck agent still fails within a small, predictable number of extra turns.
+MAX_AUTONOMY_NUDGES = 2
 MAX_ROUNDS = 2   # reviewer sends back at most twice per stage
 TOOL_RESULT_CHAR_CAP = 8000   # cap each tool result appended to history
 
@@ -359,6 +370,7 @@ After writing the artifact, confirm briefly what you produced.
 """
 
     messages = [{"role": "user", "content": user_msg}]
+    nudges_used = 0
 
     for turn in range(MAX_TURNS):
         try:
@@ -367,7 +379,14 @@ After writing the artifact, confirm briefly what you produced.
                 messages=messages,
                 tools=TOOL_SCHEMAS,
                 tool_choice="auto",
-                max_tokens=8192,
+                # Shared budget for this turn's free-text narration AND its
+                # tool-call JSON. A content-heavy stage (e.g. a scene_plan
+                # covering several clips) writing a large write_artifact
+                # payload could exhaust an 8192 cap before the JSON even
+                # finished, producing a tiny, syntactically-truncated
+                # arguments string (a handful of chars, not a large partial
+                # payload) — confirmed live. Doubled for headroom.
+                max_tokens=16384,
                 temperature=0.7,
             )
         except Exception as e:
@@ -385,11 +404,46 @@ After writing the artifact, confirm briefly what you produced.
             })
 
         if not msg.tool_calls:
-            # No tools to run → the agent is done with this stage. Do NOT gate
-            # on finish_reason: OpenAI-compatible gateways (aiapbot proxies
-            # Anthropic/DashScope/etc.) may report finish_reason=="stop" even
-            # when the message carries tool_calls; gating on "stop" would drop
-            # those calls and mark the stage complete without running them.
+            # A text-only turn with the declared artifact(s) already written
+            # is genuine completion — the prompt itself asks for exactly this
+            # ("After writing the artifact, confirm briefly what you
+            # produced."). But a text-only turn BEFORE the artifact exists
+            # usually means the agent stopped mid-task to ask for a decision
+            # (confirmed live: asset-director's own "Sample Preview" step
+            # explicitly tells it to generate one sample of each asset type
+            # and confirm with the user before batch-generating the rest).
+            # There is no synchronous human to answer that here, and a job
+            # retry starts a brand-new conversation from scratch — so ending
+            # the stage here would just discard the samples already paid for
+            # and regenerate identical ones on every retry, forever. Nudge it
+            # to proceed autonomously instead, bounded so a genuinely stuck
+            # agent still fails within a small, predictable number of turns.
+            if produces and _missing_produces(project_dir, {"produces": produces}) and nudges_used < MAX_AUTONOMY_NUDGES:
+                nudges_used += 1
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.content or "",
+                })
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "This pipeline runs unattended — no human is available to answer "
+                        "a mid-stage question or confirm a sample before you continue. "
+                        "Make the best decision yourself using what you already have, "
+                        "proceed to generate the remaining assets, and call "
+                        f"write_artifact with artifact_name=\"{produces[0]}\" once the "
+                        "stage is genuinely complete. Do not stop again to ask."
+                    ),
+                })
+                continue
+            # No tools to run and either the artifact exists, there's no
+            # produces to check, or the nudge budget is spent → the agent is
+            # done with this stage (or as done as it's going to get). Do NOT
+            # gate on finish_reason: OpenAI-compatible gateways (aiapbot
+            # proxies Anthropic/DashScope/etc.) may report finish_reason==
+            # "stop" even when the message carries tool_calls; gating on
+            # "stop" would drop those calls and mark the stage complete
+            # without running them.
             return True
 
         # Append assistant message
@@ -415,30 +469,62 @@ After writing the artifact, confirm briefly what you produced.
                 if not isinstance(tool_args, dict):
                     tool_args = {}
             except json.JSONDecodeError:
-                # Arguments were truncated — tell the model exactly what happened
+                # Arguments were cut off mid-JSON — tell the model exactly what
+                # happened. finish_reason distinguishes a real max_tokens hit
+                # ("length") from a merely malformed call the model could
+                # otherwise retry unchanged; a small raw_args count does NOT by
+                # itself mean the intended content was small — a turn's shared
+                # budget can be spent on narration/reasoning before the tool
+                # call even starts, cutting it off just a few characters in.
+                hit_length_limit = finish == "length"
                 _emit(job_id, {
                     "type": "error",
                     "stage": stage_name,
-                    "message": f"Tool {tool_name}: arguments JSON truncated ({len(raw_args)} chars). "
-                               "Agent must retry with a shorter/simpler content.",
+                    "message": (
+                        f"Tool {tool_name}: arguments JSON truncated "
+                        f"({len(raw_args)} chars, finish_reason={finish}). "
+                        "Agent must retry."
+                    ),
                 })
+                if hit_length_limit:
+                    retry_hint = (
+                        "Please retry write_artifact with a more concise 'content' object — "
+                        "keep each field value under 500 characters, omit verbose descriptions, "
+                        "and skip restating your reasoning in free text before calling the tool."
+                    )
+                else:
+                    retry_hint = (
+                        "This wasn't a length limit — the call was simply malformed. "
+                        "Retry the same tool call with valid JSON arguments."
+                    )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": (
                         f"ERROR: Your function call arguments were truncated and could not be parsed "
-                        f"({len(raw_args)} chars received, likely hit max_tokens). "
-                        "Please retry write_artifact with a more concise 'content' object — "
-                        "keep each field value under 500 characters, omit verbose descriptions."
+                        f"({len(raw_args)} chars received, finish_reason={finish}). {retry_hint}"
                     ),
                 })
                 continue
 
+            # Show the call's actual identifying argument, not its parameter
+            # names — list(tool_args.keys()) rendered the exact same
+            # "read_file(['path'])" for every read_file call regardless of
+            # which file was read, so a whole stage's log looked identical
+            # line after line.
+            if tool_name == "read_file":
+                arg_preview = tool_args.get("path", "")
+            elif tool_name == "write_artifact":
+                arg_preview = tool_args.get("artifact_name", "")
+            elif tool_name == "run_openmontage_tool":
+                arg_preview = tool_args.get("tool_name", "")
+            else:
+                arg_preview = ""
             _emit(job_id, {
                 "type": "tool_call",
                 "stage": stage_name,
                 "tool": tool_name,
-                "summary": f"{tool_name}({list(tool_args.keys())})",
+                "summary": f"{tool_name}({arg_preview})" if arg_preview else tool_name,
             })
 
             try:
@@ -718,6 +804,30 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                     f"artifact(s) {missing} — check the event log above; the agent may "
                     f"have stopped to ask for a decision (e.g. a generation provider "
                     f"failure) instead of completing. Retry will re-run this stage."
+                ),
+            })
+            return
+
+        # The compose stage's render_report/final_review artifacts existing
+        # (checked above) is NOT proof a video actually got rendered — a
+        # video_compose call can fail, and confirmed live: an agent that hit
+        # exactly that failure fabricated a plausible-looking render_report
+        # (invented file paths under a DIFFERENT project name, invented file
+        # sizes, an invented render duration) instead of retrying or
+        # reporting the failure honestly, and the job then showed as
+        # "completed" with zero actual deliverable. Require a real file under
+        # renders/ (the same glob the preview/final-video UI relies on) —
+        # don't trust the artifact's own claims about what it produced.
+        if stage_name == "compose" and not _discover_render_url(project_dir, project_name):
+            job_store.update(job_id, status="failed", current_stage=stage_name)
+            _emit(job_id, {
+                "type": "job_failed",
+                "stage": stage_name,
+                "message": (
+                    "Stage 'compose' wrote render_report/final_review but no actual "
+                    f"render file exists under {project_dir / 'renders'} — the "
+                    "report's claimed output isn't backed by a real file. Retry will "
+                    "re-run this stage."
                 ),
             })
             return
