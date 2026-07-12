@@ -11,6 +11,15 @@ import { StatusBadge, EventRow, stageLabel, mediaUrl, type SseEvent } from "@/co
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
+// SSE reconnect backoff: starts at the base interval and doubles on each
+// consecutive failure, capped at the max — a multi-minute backend outage
+// with the tab left open would otherwise hammer the server with a fixed
+// 2s retry forever. Reset back to the base the moment a connection
+// actually succeeds (es.onopen), so a single blip doesn't leave the page
+// slow to reconnect on the next, unrelated blip.
+const SSE_RECONNECT_BASE_MS = 2000;
+const SSE_RECONNECT_MAX_MS = 30000;
+
 export default function JobDetailPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const [projectName, setProjectName] = useState<string | null>(null);
@@ -65,6 +74,7 @@ export default function JobDetailPage() {
   const cancelledRef = useRef(false);   // component unmounted — stop reconnecting
   const connectRef = useRef<(() => EventSource | null) | null>(null);
   const esRef = useRef<EventSource | null>(null);   // the currently live connection, if any
+  const reconnectDelayRef = useRef(SSE_RECONNECT_BASE_MS); // current backoff wait, doubles per failed attempt
 
   // Seed real state on mount via REST — the SSE stream alone only carries
   // events from lastEventId onward; the page title (and cost/status on a
@@ -90,6 +100,12 @@ export default function JobDetailPage() {
       const url = `${SERVER}/jobs/${jobId}/events?lastEventId=${lastSeqRef.current}`;
       const es = new EventSource(url);
       esRef.current = es;
+      es.onopen = () => {
+        // Connection actually succeeded — reset the backoff so a future,
+        // unrelated blip starts retrying from the base interval again
+        // instead of inheriting whatever delay this outage grew to.
+        reconnectDelayRef.current = SSE_RECONNECT_BASE_MS;
+      };
       es.onmessage = (e) => {
         const ev: SseEvent = JSON.parse(e.data);
         lastSeqRef.current = ev.seq;
@@ -161,7 +177,9 @@ export default function JobDetailPage() {
         // Reconnect only while the job is live and the view is still mounted.
         // (Uses refs, not the captured `status`, which would be stale here.)
         if (!doneRef.current && !cancelledRef.current) {
-          setTimeout(() => { if (!cancelledRef.current && !doneRef.current) connect(); }, 2000);
+          const delay = reconnectDelayRef.current;
+          reconnectDelayRef.current = Math.min(delay * 2, SSE_RECONNECT_MAX_MS);
+          setTimeout(() => { if (!cancelledRef.current && !doneRef.current) connect(); }, delay);
         }
       };
       return es;
@@ -243,10 +261,15 @@ export default function JobDetailPage() {
         setPreview(parsed);
         setEditMode(false);
       } else {
-        setEditError("保存失败，请重试");
+        // Surface the backend's actual reason (e.g. the artifact-save
+        // endpoint's 400 for a stage name that isn't one of this job's
+        // real pipeline stages) instead of a generic message that hides
+        // why the save silently did nothing.
+        const body = await res.json().catch(() => ({}));
+        setEditError(body.detail ?? `保存失败 (HTTP ${res.status})，请重试`);
       }
     } catch {
-      setEditError("保存失败，请重试");
+      setEditError("网络错误，请检查后端是否可访问");
     } finally {
       setSaving(false);
     }
@@ -400,7 +423,17 @@ export default function JobDetailPage() {
                   value={editJson}
                   onChange={(e) => setEditJson(e.target.value)}
                 />
-                {editError && <p className="text-xs text-destructive">{editError}</p>}
+                {/* Same red border/bg/text treatment as the top-level
+                    actionError card used for approve/retry failures — the
+                    save-artifact endpoint's non-200 response (e.g. a stage
+                    name rejected by the backend's pipeline-stage check)
+                    must not disappear silently; the user needs to see the
+                    save didn't actually take effect. */}
+                {editError && (
+                  <div className="text-sm text-red-400 border border-red-500/40 bg-red-500/10 rounded px-3 py-2">
+                    {editError}
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <Button size="sm" onClick={handleSaveEdit} disabled={saving}>
                     {saving ? "保存中…" : "保存修改"}
