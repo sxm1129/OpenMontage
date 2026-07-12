@@ -55,17 +55,36 @@ const STATUS_MAP: Record<string, { label: string; cls: string }> = {
   failed:            { label: "失败",   cls: "bg-red-500/20 text-red-400 border-red-500/30" },
 };
 
+// Style for a status the backend sent that isn't in STATUS_MAP — kept
+// separate from STATUS_MAP.queued so a future restyle of "queued" can't
+// accidentally change what an unknown status looks like.
+const NEUTRAL_STATUS_CLS = "bg-muted text-muted-foreground border-border";
+
 const EVENT_COLOR: Record<string, string> = {
   stage_started: "text-blue-400", stage_completed: "text-green-400",
   tool_call: "text-purple-400", artifact_written: "text-cyan-400",
   asset_ready: "text-emerald-400", awaiting_approval: "text-yellow-400",
   stage_approved: "text-green-400", stage_rejected: "text-orange-400",
   job_completed: "text-green-400", job_failed: "text-red-400", error: "text-red-400",
+  job_started: "text-blue-400", stage_skipped: "text-muted-foreground",
+  stage_retry: "text-orange-400", cost_updated: "text-slate-400",
+  preview_ready: "text-emerald-400",
+  budget_exceeded: "text-red-400", budget_precall_block: "text-orange-400",
+};
+
+// Chinese labels for event types that never carry a summary/text/artifact/
+// message field from the backend (see server/app/runner/stage_runner.py and
+// tool_bridge.py) — without this, eventLabel's fallback chain bottoms out on
+// the raw English `type` string.
+const EVENT_TYPE_LABELS: Record<string, string> = {
+  job_started: "任务开始", stage_skipped: "跳过阶段", stage_retry: "阶段重试",
+  cost_updated: "费用更新", preview_ready: "预览就绪",
+  budget_exceeded: "预算超限", budget_precall_block: "预算预检拦截",
 };
 
 /** The human-facing label chosen for an event row (precedence matters). */
 export function eventLabel(ev: SseEvent): string {
-  return ev.summary ?? ev.text ?? ev.artifact ?? ev.message ?? ev.type;
+  return ev.summary ?? ev.text ?? ev.artifact ?? ev.message ?? EVENT_TYPE_LABELS[ev.type] ?? ev.type;
 }
 
 /**
@@ -80,18 +99,19 @@ export function eventLabel(ev: SseEvent): string {
  */
 export function mediaUrl(serverBase: string, path: string | null | undefined): string | null {
   if (!path) return null;
-  if (/^https?:\/\//i.test(path)) return path;   // already absolute
-  return `${serverBase}${path.startsWith("/") ? "" : "/"}${path}`;
+  if (/^https?:\/\//i.test(path) || path.startsWith("//")) return path;   // already absolute
+  const base = serverBase.endsWith("/") ? serverBase.slice(0, -1) : serverBase;
+  return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
 }
 
 export function StatusBadge({ status }: { status: string }) {
-  const s = STATUS_MAP[status] ?? STATUS_MAP.queued;
+  const s = STATUS_MAP[status];
   return (
     <span
       data-testid="status-badge"
-      className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border ${s.cls}`}
+      className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border ${s?.cls ?? NEUTRAL_STATUS_CLS}`}
     >
-      {s.label}
+      {s?.label ?? status}
     </span>
   );
 }

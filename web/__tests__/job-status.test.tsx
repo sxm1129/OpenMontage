@@ -22,9 +22,11 @@ describe("StatusBadge", () => {
     }
   });
 
-  it("falls back to the queued style for an unknown status", () => {
+  it("renders the raw status string with a neutral style for an unknown status, not the queued label", () => {
     render(<StatusBadge status="who_knows" />);
-    expect(screen.getByTestId("status-badge")).toHaveTextContent("排队中");
+    const badge = screen.getByTestId("status-badge");
+    expect(badge).toHaveTextContent("who_knows");
+    expect(badge.className).toContain("bg-muted");
   });
 
   it("applies the status-specific colour class", () => {
@@ -42,6 +44,25 @@ describe("eventLabel precedence", () => {
     expect(eventLabel(ev({ artifact: "A", message: "M" }))).toBe("A");
     expect(eventLabel(ev({ message: "M" }))).toBe("M");
     expect(eventLabel(ev({ type: "job_failed" }))).toBe("job_failed");
+  });
+
+  it("uses a Chinese label for backend event types that carry no summary/text/artifact/message", () => {
+    // Regression: budget_precall_block, cost_updated, job_started,
+    // stage_skipped, stage_retry, preview_ready, and budget_exceeded are
+    // emitted by the runner with no free-text field, so this used to leak
+    // the raw English type string straight into the UI.
+    const cases: [string, string][] = [
+      ["budget_precall_block", "预算预检拦截"],
+      ["cost_updated", "费用更新"],
+      ["job_started", "任务开始"],
+      ["stage_skipped", "跳过阶段"],
+      ["stage_retry", "阶段重试"],
+      ["preview_ready", "预览就绪"],
+      ["budget_exceeded", "预算超限"],
+    ];
+    for (const [type, label] of cases) {
+      expect(eventLabel(ev({ type }))).toBe(label);
+    }
   });
 });
 
@@ -104,6 +125,16 @@ describe("mediaUrl", () => {
       .toBe("https://cdn.example.com/final.mp4");
     expect(mediaUrl(SERVER, "http://other-host/final.mp4"))
       .toBe("http://other-host/final.mp4");
+  });
+
+  it("leaves a protocol-relative URL untouched instead of double-prefixing it", () => {
+    expect(mediaUrl(SERVER, "//cdn.example.com/final.mp4"))
+      .toBe("//cdn.example.com/final.mp4");
+  });
+
+  it("strips a trailing slash from serverBase before prefixing", () => {
+    expect(mediaUrl("http://localhost:8010/", "/media/proj/renders/final.mp4"))
+      .toBe("http://localhost:8010/media/proj/renders/final.mp4");
   });
 
   it("returns null for null/undefined/empty input", () => {
