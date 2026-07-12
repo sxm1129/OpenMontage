@@ -268,6 +268,12 @@ class MaasImage(MaasBaseTool):
         output_path = Path(inputs.get("output_path", f"maas_image_{int(start)}.png"))
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # seed=0 is a valid, meaningful value (not "unset") — an `or` fallback
+        # would wrongly treat it as falsy and silently replace it with
+        # first.get("seed") (or None). Mirrors the explicit `is not None`
+        # check already used when building the outgoing request payload.
+        resolved_seed = data.get("seed") if data.get("seed") is not None else first.get("seed")
+
         if first.get("b64_json"):
             output_path.write_bytes(base64.b64decode(first["b64_json"]))
         elif first.get("url"):
@@ -287,11 +293,11 @@ class MaasImage(MaasBaseTool):
                 "output": str(output_path),
                 "output_path": str(output_path),
                 "format": "png",
-                "seed": data.get("seed") or first.get("seed"),
+                "seed": resolved_seed,
             },
             artifacts=[str(output_path)],
             cost_usd=self.estimate_cost(inputs),   # 0.0 for free MaaS image gen
             duration_seconds=round(time.time() - start, 2),
-            seed=data.get("seed") or first.get("seed"),
+            seed=resolved_seed,
             model=model,
         )

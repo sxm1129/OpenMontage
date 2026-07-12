@@ -289,6 +289,16 @@ class MaasTTS(MaasBaseTool):
                     error=f"No job id in MaaS TTS submit response: {submit.json()}",
                 )
 
+            # 60s (vs maas_video.py's 600s and maas_image.py's 300s for the
+            # structurally same submit/poll/download pattern) is not an
+            # arbitrarily tight budget copy-pasted from elsewhere — it
+            # matches this model's own documented profile:
+            # docs/multimodal-call-guide-v4.md §1 states leapfast/indextts's
+            # typical latency is 2-15s (2 GPU workers concurrent), and its
+            # own §9.2 polling-strategy table recommends a 60s max wait for
+            # IndexTTS specifically, distinct from the 300-600s recommended
+            # for the video models (which render for minutes, not seconds).
+            # Left unchanged; revisit if real-world timeouts are observed.
             deadline = start + 60
             # Job is already submitted/billed — tolerate transient poll blips,
             # but cap them so a persistently broken poll endpoint fails fast

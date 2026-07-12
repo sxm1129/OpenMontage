@@ -7,6 +7,8 @@ model family by hand.
 
 from __future__ import annotations
 
+import pytest
+
 from tools.video.maas_video import MaasVideo
 
 
@@ -85,6 +87,33 @@ def test_wan22_drops_resolution_and_audio_uses_size_grid():
 
 def test_wan22_registered_with_correct_ops_and_no_audio_note():
     assert MaasVideo.MODELS["leapfast/wan2.2"]["ops"] == ["t2v", "i2v"]
+
+
+def test_seedance_i2v_estimate_cost_still_uses_default_duration():
+    """Characterization test for a documented, known discrepancy: Volcengine
+    rejects duration_seconds on Seedance i2v/r2v (see the test above), so
+    _build_payload() omits it from the actual request — but estimate_cost()
+    still multiplies the per-second rate by inputs.get("duration_seconds", 5)
+    regardless. There's no real Volcengine billing doc to derive a more
+    correct formula from, so this pins the current (documented-as-approximate)
+    behavior rather than silently drifting. See the comment at the
+    estimate_cost() call site in execute() for the full explanation."""
+    tool = MaasVideo()
+    inputs = {
+        "prompt": "a cat",
+        "model": "volcengine/doubao-seedance-2.0",
+        "operation": "image_to_video",
+        "image_url": "https://example.com/cat.png",
+        "resolution": "720p",
+        "duration_seconds": 10,
+    }
+    payload, _ = tool._build_payload(
+        "volcengine/doubao-seedance-2.0", "image_to_video", inputs
+    )
+    assert "duration_seconds" not in payload  # not sent to Volcengine
+
+    # Yet the estimate still bills as if 10s were requested (price_720p=1.00).
+    assert tool.estimate_cost(inputs) == pytest.approx(10.0)
 
 
 def test_wan22_reference_to_video_rejected_not_supported():

@@ -524,6 +524,18 @@ class MaasVideo(MaasBaseTool):
             artifacts=[str(output_path)],
             # MaaS bills in CNY per second of generated video; report the
             # resolution/duration-based charge so cost tracking is meaningful.
+            # KNOWN DISCREPANCY: estimate_cost() always multiplies the
+            # per-second rate by inputs.get("duration_seconds", 5), but for
+            # Seedance-family image_to_video/reference_to_video,
+            # _build_payload() deliberately OMITS duration_seconds from the
+            # actual request (Volcengine rejects it for i2v/r2v — see the
+            # module docstring and _build_payload()). What Volcengine
+            # actually bills per i2v/r2v clip for this family isn't
+            # documented anywhere in this codebase or in
+            # docs/multimodal-call-guide-v4.md, so treat this number as an
+            # approximation, not an exact pre-call budget figure, for
+            # Seedance i2v/r2v specifically. Do not "fix" this by inventing a
+            # billing formula without real Volcengine billing docs to back it.
             cost_usd=self.estimate_cost(inputs),
             duration_seconds=round(time.time() - start, 2),
             model=model,
