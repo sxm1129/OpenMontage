@@ -186,6 +186,17 @@ def _enforce_model_choice(tool_name: str, inputs: dict[str, Any], options: dict[
 
     requested = inputs.get("model")
     if not requested:
+        if allowed and len(allowed) > 1:
+            # A genuine A/B choice exists — autofilling here would silently
+            # collapse every call onto allowed[0], so every "variant" in the
+            # run ends up using the same model with nothing anywhere to flag
+            # it. Require the agent to say which one explicitly instead.
+            return (
+                f"ERROR: this job declares {len(allowed)} {cfg['default_key']} variants "
+                f"({allowed}) — inputs.model must be set explicitly to one of them on "
+                f"every {tool_name} call. Omitting it would silently collapse every "
+                "variant onto the same model."
+            )
         # Fill in rather than reject — the common case (no variants) should
         # just work without the agent having to echo the option back.
         inputs["model"] = (allowed[0] if allowed else default)
@@ -200,6 +211,49 @@ def _enforce_model_choice(tool_name: str, inputs: dict[str, Any], options: dict[
         f"setting. This job is constrained to: {permitted}. "
         f"Retry {tool_name} with model set to one of those — do not substitute a different "
         f"one even if you believe it fits the prompt better; the user chose this in the wizard."
+    )
+
+
+def _enforce_compose_variant_tag(
+    tool: Any, inputs: dict[str, Any], options: dict[str, Any] | None
+) -> str | None:
+    """Require inputs["variant"] to be explicit on a compose call when the
+    job declares more than one video_model_variants entry (an A/B run).
+
+    Mirrors _enforce_model_choice's pattern, but for the compose stage —
+    which has no `model` field of its own to validate against. The only way
+    a compose call can say which A/B branch it belongs to is
+    inputs["variant"] (see the output-path tagging in execute_tool below,
+    which folds it into renders/final_<slug>.mp4). Without this guard, an
+    agent that forgets to tag one of N compose calls in a multi-variant job
+    falls back to the untagged "final.mp4" path, silently colliding with —
+    and potentially overwriting — another variant's rendered output.
+
+    Only enforced when more than one variant is declared and the call is
+    actually a compose (not trim/stitch/etc.) — a single-variant (or
+    non-A/B) job has nothing to collide with, so the existing permissive
+    default-tag behavior is preserved there.
+    """
+    if not options or tool is None:
+        return None
+    if getattr(tool, "capability", None) != "video_post":
+        return None
+    if inputs.get("operation", "compose") != "compose":
+        return None
+
+    variants = options.get("video_model_variants")
+    allowed = [m for m in variants if m] if isinstance(variants, list) and variants else None
+    if not allowed or len(allowed) <= 1:
+        return None
+
+    if inputs.get("variant"):
+        return None
+
+    return (
+        f"ERROR: this job declares {len(allowed)} video_model_variants ({allowed}) — "
+        "every compose call must set inputs.variant to the exact model string for the "
+        "branch it is rendering. Omitting it would silently fall back to the untagged "
+        "'final.mp4' output, colliding with another variant's render."
     )
 
 
@@ -326,6 +380,10 @@ def execute_tool(
         enforcement_error = _enforce_model_choice(tool_name, inputs, options)
         if enforcement_error:
             return enforcement_error
+
+        compose_variant_error = _enforce_compose_variant_tag(tool, inputs, options)
+        if compose_variant_error:
+            return compose_variant_error
 
         if tool_name == "maas_tts":
             _apply_tts_emotion_defaults(inputs, options)

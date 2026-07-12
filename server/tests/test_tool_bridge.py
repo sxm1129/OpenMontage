@@ -236,6 +236,43 @@ def test_model_choice_allows_any_listed_variant(tmp_path, monkeypatch):
         assert tool.executed_with["model"] == model
 
 
+def test_model_choice_requires_explicit_model_when_ab_variants_declared(tmp_path, monkeypatch):
+    # Regression: omitting `model` on an A/B job used to silently autofill
+    # allowed[0] for every call, collapsing every "variant" onto the same
+    # model with nothing anywhere flagging it. Now it must be rejected
+    # before the (paid) call, same as an explicit mismatch is.
+    tool = FakeTool(capability="video_generation")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    out = execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_video", "inputs": {"prompt": "x"}},
+        tmp_path,
+        options={"video_model_variants": ["leapfast/ltx-2.3", "leapfast/wan2.2"]},
+    )
+    assert "ERROR" in out
+    assert "leapfast/ltx-2.3" in out and "leapfast/wan2.2" in out
+    assert tool.executed_with is None  # rejected before the (paid) call
+
+
+def test_model_choice_still_autofills_single_variant_list(tmp_path, monkeypatch):
+    # A variants list with exactly one entry has nothing to collapse —
+    # requiring an explicit echo back would just be friction, so the
+    # permissive autofill behavior is preserved.
+    tool = FakeTool(capability="video_generation")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "maas_video", "inputs": {"prompt": "x"}},
+        tmp_path,
+        options={"video_model_variants": ["leapfast/ltx-2.3"]},
+    )
+    assert tool.executed_with["model"] == "leapfast/ltx-2.3"
+
+
 def test_unconstrained_job_options_dont_touch_model(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_generation")
     from tools import tool_registry
@@ -283,6 +320,76 @@ def test_compose_variant_tag_produces_distinct_render_filenames(tmp_path, monkey
     assert ltx_path.endswith("/renders/final_ltx-2-3.mp4")
     assert wan_path.endswith("/renders/final_wan2-2.mp4")
     assert "variant" not in tool.executed_with  # popped — not a real tool param
+
+
+def test_compose_rejects_missing_variant_when_ab_job_declared(tmp_path, monkeypatch):
+    # Regression: a compose call that omits inputs.variant on a job with
+    # multiple video_model_variants used to silently fall back to the
+    # untagged "final.mp4" path, colliding with (and potentially
+    # overwriting) whichever variant's compose call ran first/last.
+    tool = FakeTool(capability="video_post")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    out = execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "video_compose", "inputs": {"operation": "compose"}},
+        tmp_path,
+        options={"video_model_variants": ["leapfast/ltx-2.3", "leapfast/wan2.2"]},
+    )
+    assert "ERROR" in out
+    assert "leapfast/ltx-2.3" in out and "leapfast/wan2.2" in out
+    assert tool.executed_with is None  # rejected before writing/overwriting a render
+
+
+def test_compose_allows_missing_variant_when_only_one_variant_declared(tmp_path, monkeypatch):
+    # Nothing to collide with when there's only one (or zero) variants —
+    # the existing permissive default-tag behavior is preserved.
+    tool = FakeTool(capability="video_post")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    out = execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "video_compose", "inputs": {"operation": "compose"}},
+        tmp_path,
+        options={"video_model_variants": ["leapfast/ltx-2.3"]},
+    )
+    assert json.loads(out)["success"] is True
+    assert tool.executed_with["output_path"].endswith("/renders/final.mp4")
+
+
+def test_compose_with_explicit_variant_proceeds_on_ab_job(tmp_path, monkeypatch):
+    tool = FakeTool(capability="video_post")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    out = execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "video_compose", "inputs": {"operation": "compose", "variant": "leapfast/ltx-2.3"}},
+        tmp_path,
+        options={"video_model_variants": ["leapfast/ltx-2.3", "leapfast/wan2.2"]},
+    )
+    assert json.loads(out)["success"] is True
+    assert tool.executed_with["output_path"].endswith("/renders/final_ltx-2-3.mp4")
+
+
+def test_compose_variant_requirement_ignores_non_compose_video_post_ops(tmp_path, monkeypatch):
+    # The guard is specific to the compose op — trim/stitch calls within an
+    # A/B job aren't subject to the same collision (they already get a
+    # unique random-suffixed filename in assets/, not a deterministic
+    # renders/final.mp4).
+    tool = FakeTool(capability="video_post")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    out = execute_tool(
+        "run_openmontage_tool",
+        {"tool_name": "video_compose", "inputs": {"operation": "trim"}},
+        tmp_path,
+        options={"video_model_variants": ["leapfast/ltx-2.3", "leapfast/wan2.2"]},
+    )
+    assert json.loads(out)["success"] is True
 
 
 def test_tts_emotion_defaults_filled_when_agent_omits(tmp_path, monkeypatch):
