@@ -506,3 +506,37 @@ async def test_sample_preview_gate_reject_carries_feedback_into_resume(runner, m
     assert resumed_with
     assert "wrong tone, make it warmer" in resumed_with[0][-1]["content"]
     assert runner.get("j")["status"] == "completed"
+
+
+async def test_automatic_retry_folds_last_failure_into_feedback(runner, monkeypatch, tmp_path):
+    # Regression: the automatic stage-retry loop (distinct from the human
+    # reject loop above) used to call _run_agent_stage again with
+    # feedback="" every time — a brand-new conversation with no idea what
+    # went wrong last time, so a deterministic failure reproduced identically
+    # up to MAX_ROUNDS times.
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
+
+    feedback_seen = []
+
+    def flaky_research(*a, **k):
+        feedback = a[6]
+        feedback_seen.append(feedback)
+        if len(feedback_seen) == 1:
+            stage_runner._emit(a[0], {"type": "error", "stage": a[1], "message": "malformed tool call: xyz"})
+            return False
+        return True
+
+    def dispatch(*a, **k):
+        stage_name = a[1]
+        return (flaky_research if stage_name == "research" else (lambda *a, **k: True))(*a, **k)
+
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", dispatch)
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    assert runner.get("j")["status"] == "completed"
+    assert len(feedback_seen) == 2
+    assert feedback_seen[0] == ""             # first attempt: no prior failure
+    assert "malformed tool call: xyz" in feedback_seen[1]   # retry: knows what broke

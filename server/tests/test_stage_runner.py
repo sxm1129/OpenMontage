@@ -10,6 +10,7 @@ from app.runner import stage_runner
 from app.runner.stage_runner import (
     _discover_render_url, _discover_render_urls, _load_artifacts, _load_brand_kit,
     _brand_reference_image_data_uri, _MAX_REFERENCE_DATA_URI_CHARS,
+    _truncate_json_for_prompt, _last_failure_message,
 )
 
 
@@ -530,3 +531,70 @@ def test_prompt_falls_back_to_stage_name_without_produces(tmp_path, monkeypatch)
     stage_runner._run_agent_stage("job-z2", "custom_stage", "skill", tmp_path, {}, {})
     user_msg = captured["messages"][0]["content"]
     assert 'artifact_name="custom_stage"' in user_msg or '"custom_stage"' in user_msg
+
+
+# ── quality-review smell fixes: truncation markers, per-stage tuning ────────
+
+def test_truncate_json_for_prompt_leaves_short_text_untouched():
+    assert _truncate_json_for_prompt("short", 100) == "short"
+
+
+def test_truncate_json_for_prompt_adds_marker_when_cut():
+    text = "x" * 50
+    out = _truncate_json_for_prompt(text, 10)
+    assert out.startswith("x" * 10)
+    assert "truncated" in out
+    assert "50 total chars" in out
+
+
+def test_last_failure_message_finds_most_recent_matching_error(tmp_path, monkeypatch):
+    ts = __import__("app.store", fromlist=["JobStore"]).JobStore(persist_dir=tmp_path / "js")
+    monkeypatch.setattr(stage_runner, "job_store", ts)
+    ts.create("job-fail", {})
+    ts.push_event("job-fail", {"type": "error", "stage": "assets", "message": "first failure"})
+    ts.push_event("job-fail", {"type": "agent_text", "stage": "assets", "text": "unrelated"})
+    ts.push_event("job-fail", {"type": "error", "stage": "assets", "message": "second failure"})
+    ts.push_event("job-fail", {"type": "error", "stage": "script", "message": "different stage"})
+    assert _last_failure_message("job-fail", "assets") == "second failure"
+
+
+def test_last_failure_message_empty_when_no_error(tmp_path, monkeypatch):
+    ts = __import__("app.store", fromlist=["JobStore"]).JobStore(persist_dir=tmp_path / "js")
+    monkeypatch.setattr(stage_runner, "job_store", ts)
+    ts.create("job-clean", {})
+    assert _last_failure_message("job-clean", "assets") == ""
+
+
+def test_assets_stage_has_higher_max_turns_and_lower_temperature():
+    # Regression: MAX_TURNS/temperature used to be single global constants
+    # shared by every stage regardless of complexity — assets (many
+    # generation calls per scene) needs more turns, and structured/
+    # schema-writing stages benefit from lower temperature than the
+    # genuinely creative ones.
+    assets = next(s for s in stage_runner.CINEMATIC_STAGES if s["name"] == "assets")
+    assert assets["max_turns"] > stage_runner.MAX_TURNS
+    assert assets["temperature"] < 0.7
+
+
+def test_run_agent_stage_honors_custom_max_turns_and_temperature(tmp_path, monkeypatch):
+    # Keep calling a real tool every turn (never a text-only stall) so the
+    # loop can only end by exhausting max_turns, isolating that from the
+    # separate sample-preview iteration budget.
+    keep_reading = _resp(
+        "reading", [_tool_call("c1", "read_file", '{"path": "does-not-exist.xyz"}')], "stop",
+    )
+    captured = {}
+    def fake_create(**kw):
+        captured.setdefault("calls", 0)
+        captured["calls"] += 1
+        captured["temperature"] = kw["temperature"]
+        return keep_reading
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    ok = stage_runner._run_agent_stage(
+        "job-turns", "assets", "skill", tmp_path, {}, {},
+        max_turns=3, temperature=0.3,
+    )
+    assert ok is False   # exhausted max_turns without completing
+    assert captured["calls"] == 3   # bounded by the custom max_turns, not the global default
+    assert captured["temperature"] == 0.3

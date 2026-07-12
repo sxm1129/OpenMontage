@@ -37,7 +37,7 @@ class FakeTool:
 
 def _run_tool(project_dir, tool, monkeypatch, **kw):
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     args = {"tool_name": "maas_video", "inputs": {"prompt": "x", "operation": "t2v"}}
     return execute_tool("run_openmontage_tool", args, project_dir, **kw)
@@ -116,7 +116,7 @@ def test_unknown_tool(tmp_path):
 def test_compose_routes_final_to_renders(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_post")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     execute_tool("run_openmontage_tool",
                  {"tool_name": "video_compose", "inputs": {"operation": "compose"}},
@@ -127,7 +127,7 @@ def test_compose_routes_final_to_renders(tmp_path, monkeypatch):
 def test_video_post_non_compose_stays_in_assets(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_post")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     execute_tool("run_openmontage_tool",
                  {"tool_name": "video_compose", "inputs": {"operation": "trim"}},
@@ -144,7 +144,7 @@ def test_repeated_calls_to_same_tool_get_distinct_output_paths(tmp_path, monkeyp
     # file on disk — each call clobbered the last.
     tool = FakeTool(capability="video_generation")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
 
     paths = []
@@ -194,7 +194,7 @@ def test_variant_slug_from_model_id():
 def test_model_choice_filled_in_when_agent_omits_it(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_generation")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     execute_tool(
         "run_openmontage_tool",
@@ -208,7 +208,7 @@ def test_model_choice_filled_in_when_agent_omits_it(tmp_path, monkeypatch):
 def test_model_choice_rejects_mismatch_before_calling_tool(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_generation")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     out = execute_tool(
         "run_openmontage_tool",
@@ -224,7 +224,7 @@ def test_model_choice_rejects_mismatch_before_calling_tool(tmp_path, monkeypatch
 def test_model_choice_allows_any_listed_variant(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_generation")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     for model in ("leapfast/ltx-2.3", "leapfast/wan2.2"):
         execute_tool(
@@ -239,7 +239,7 @@ def test_model_choice_allows_any_listed_variant(tmp_path, monkeypatch):
 def test_unconstrained_job_options_dont_touch_model(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_generation")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     execute_tool(
         "run_openmontage_tool",
@@ -253,7 +253,7 @@ def test_unconstrained_job_options_dont_touch_model(tmp_path, monkeypatch):
 def test_variant_tag_keeps_asset_output_paths_distinguishable(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_generation")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     execute_tool(
         "run_openmontage_tool",
@@ -266,7 +266,7 @@ def test_variant_tag_keeps_asset_output_paths_distinguishable(tmp_path, monkeypa
 def test_compose_variant_tag_produces_distinct_render_filenames(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_post")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
 
     execute_tool("run_openmontage_tool",
@@ -288,7 +288,7 @@ def test_compose_variant_tag_produces_distinct_render_filenames(tmp_path, monkey
 def test_tts_emotion_defaults_filled_when_agent_omits(tmp_path, monkeypatch):
     tool = FakeTool(capability="tts")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     execute_tool(
         "run_openmontage_tool",
@@ -309,7 +309,7 @@ def test_tts_emotion_defaults_zero_alpha_is_applied_not_treated_as_unset(tmp_pat
     # value — a truthiness check would silently drop it.
     tool = FakeTool(capability="tts")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     execute_tool(
         "run_openmontage_tool",
@@ -323,7 +323,7 @@ def test_tts_emotion_defaults_zero_alpha_is_applied_not_treated_as_unset(tmp_pat
 def test_tts_emotion_defaults_respect_agent_override(tmp_path, monkeypatch):
     tool = FakeTool(capability="tts")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     execute_tool(
         "run_openmontage_tool",
@@ -337,7 +337,7 @@ def test_tts_emotion_defaults_respect_agent_override(tmp_path, monkeypatch):
 def test_tts_emotion_defaults_ignored_for_other_tools(tmp_path, monkeypatch):
     tool = FakeTool(capability="video_generation")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     execute_tool(
         "run_openmontage_tool",
@@ -351,7 +351,7 @@ def test_tts_emotion_defaults_ignored_for_other_tools(tmp_path, monkeypatch):
 def test_tts_emotion_defaults_no_op_without_options(tmp_path, monkeypatch):
     tool = FakeTool(capability="tts")
     from tools import tool_registry
-    monkeypatch.setattr(tool_registry.registry, "discover", lambda: None)
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
     monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
     execute_tool(
         "run_openmontage_tool",

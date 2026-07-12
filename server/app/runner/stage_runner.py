@@ -61,10 +61,19 @@ CINEMATIC_STAGES = [
     # every one of these stages' own director skills ("Gate Reminder
     # (Binding)") were updated to require a checkpoint, silently skipping the
     # asset-generation cost gate for every job run through this runner.
-    {"name": "scene_plan",  "skill": "skills/pipelines/cinematic/scene-director.md",      "approval": True,  "produces": ["scene_plan"], "required_artifacts_in": ["script"]},
-    {"name": "assets",      "skill": "skills/pipelines/cinematic/asset-director.md",      "approval": True,  "produces": ["asset_manifest"], "required_artifacts_in": ["scene_plan"]},
-    {"name": "edit",        "skill": "skills/pipelines/cinematic/edit-director.md",       "approval": False, "produces": ["edit_decisions"], "required_artifacts_in": ["scene_plan", "asset_manifest"]},
-    {"name": "compose",     "skill": "skills/pipelines/cinematic/compose-director.md",    "approval": False, "produces": ["render_report", "final_review"], "required_artifacts_in": ["edit_decisions", "asset_manifest"]},
+    # scene_plan/assets/edit/compose write schema-shaped JSON that downstream
+    # stages parse structurally — a lower temperature trades away creative
+    # variance (not needed here) for more reliable schema-following and less
+    # truncation/format drift, vs. the default 0.7 kept for the genuinely
+    # creative stages (research, proposal, script, publish).
+    {"name": "scene_plan",  "skill": "skills/pipelines/cinematic/scene-director.md",      "approval": True,  "produces": ["scene_plan"], "required_artifacts_in": ["script"], "temperature": 0.3},
+    # max_turns doubled vs. the global default (20) — this stage places one
+    # or more generation calls (video/image/tts) per scene across the whole
+    # scene_plan, which routinely needs more turns than a single-artifact
+    # planning stage.
+    {"name": "assets",      "skill": "skills/pipelines/cinematic/asset-director.md",      "approval": True,  "produces": ["asset_manifest"], "required_artifacts_in": ["scene_plan"], "max_turns": 40, "temperature": 0.3},
+    {"name": "edit",        "skill": "skills/pipelines/cinematic/edit-director.md",       "approval": False, "produces": ["edit_decisions"], "required_artifacts_in": ["scene_plan", "asset_manifest"], "temperature": 0.3},
+    {"name": "compose",     "skill": "skills/pipelines/cinematic/compose-director.md",    "approval": False, "produces": ["render_report", "final_review"], "required_artifacts_in": ["edit_decisions", "asset_manifest"], "temperature": 0.3},
     {"name": "publish",     "skill": "skills/pipelines/cinematic/publish-director.md",    "approval": True,  "produces": ["publish_log"], "required_artifacts_in": ["render_report", "final_review"]},
 ]
 
@@ -155,12 +164,51 @@ class SamplePreviewNeeded(Exception):
         self.messages = messages
         self.preview_text = preview_text
         self.sample_iteration = sample_iteration
-MAX_ROUNDS = 2   # reviewer sends back at most twice per stage
-TOOL_RESULT_CHAR_CAP = 8000   # cap each tool result appended to history
+MAX_ROUNDS = 2   # bounded auto-retry when _run_agent_stage returns False (not the human reject loop, a separate mechanism below)
+# Cap each tool result appended to history. Must exceed tool_bridge.py's own
+# read_file cap (12000 chars) — otherwise a file near that size gets
+# truncated twice: once by read_file with a clean "[truncated — N total
+# chars]" marker, then re-sliced here mid-marker, producing a garbled nested
+# truncation notice instead of one clean one.
+TOOL_RESULT_CHAR_CAP = 13000
 
 
 def _emit(job_id: str, event: dict) -> None:
     job_store.push_event(job_id, {"ts": time.time(), **event})
+
+
+def _truncate_json_for_prompt(text: str, cap: int) -> str:
+    """Slice a JSON dump for prompt inclusion, with a visible marker when cut.
+
+    A naive [:cap] slice with no marker (the previous behavior for both
+    brand-kit and prior-artifacts injection) gives the agent no signal that
+    what it's reading is incomplete, unlike every other truncation point in
+    this file/tool_bridge.py, which all append a "[truncated — N total
+    chars]" note. Note this doesn't fully solve a cut landing mid-object
+    (still syntactically invalid JSON) — that would need truncating whole
+    artifacts rather than a raw string slice, a bigger change than this
+    fixes.
+    """
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f"\n... [truncated — {len(text)} total chars]"
+
+
+def _last_failure_message(job_id: str, stage_name: str) -> str:
+    """Most recent "error" event's message for this stage, or "" if none.
+
+    The automatic stage-retry loop used to call _run_agent_stage again with
+    feedback="" every time — a brand-new conversation with identical inputs
+    to the one that just failed, so a deterministic failure (e.g. the same
+    malformed tool call) had no way to change on retry. _run_agent_stage
+    only returns True/False, not a reason, but every failure path already
+    _emits an "error" event before returning False — reuse that instead of
+    growing the function's already-large parameter list further.
+    """
+    for ev in reversed(job_store.get_events(job_id, after_seq=-1)):
+        if ev.get("type") == "error" and ev.get("stage") == stage_name:
+            return ev.get("message", "")
+    return ""
 
 
 def _load_artifacts(project_dir: Path) -> dict[str, Any]:
@@ -296,6 +344,8 @@ def _run_agent_stage(
     produces: list[str] | None = None,
     resume_messages: list[dict] | None = None,
     sample_iteration: int = 0,
+    max_turns: int = MAX_TURNS,
+    temperature: float = 0.7,
 ) -> bool:
     """Run a single stage. Returns True on success, False on failure.
 
@@ -319,7 +369,7 @@ def _run_agent_stage(
     if brand_kit:
         brand_section = f"""
 ## Brand Kit (use these to ensure visual/tonal consistency)
-{json.dumps(brand_kit, ensure_ascii=False, indent=2)[:2000]}
+{_truncate_json_for_prompt(json.dumps(brand_kit, ensure_ascii=False, indent=2), 2000)}
 """
         ref_data_uri = _brand_reference_image_data_uri(kit_id, brand_kit)
         if ref_data_uri and stage_name == "assets":
@@ -409,7 +459,7 @@ variant's `run_openmontage_tool` (video_compose, operation="compose" or
 - Available artifacts from previous stages: {artifacts_summary}
 {brand_section}
 ## Prior Artifacts (content)
-{json.dumps(artifacts, ensure_ascii=False, indent=2)[:6000]}
+{_truncate_json_for_prompt(json.dumps(artifacts, ensure_ascii=False, indent=2), 6000)}
 
 ## User Feedback (if any)
 {feedback or "None — proceed normally."}
@@ -434,7 +484,7 @@ After writing the artifact, confirm briefly what you produced.
     # reference to it.
     messages = list(resume_messages) if resume_messages is not None else [{"role": "user", "content": user_msg}]
 
-    for turn in range(MAX_TURNS):
+    for turn in range(max_turns):
         try:
             response = llm.chat.completions.create(
                 model=LLM_MODEL,
@@ -449,7 +499,7 @@ After writing the artifact, confirm briefly what you produced.
                 # arguments string (a handful of chars, not a large partial
                 # payload) — confirmed live. Doubled for headroom.
                 max_tokens=16384,
-                temperature=0.7,
+                temperature=temperature,
             )
         except Exception as e:
             _emit(job_id, {"type": "error", "stage": stage_name, "message": str(e)})
@@ -629,7 +679,7 @@ After writing the artifact, confirm briefly what you produced.
     _emit(job_id, {
         "type": "error",
         "stage": stage_name,
-        "message": f"Stage {stage_name} reached max turns ({MAX_TURNS}) without completing",
+        "message": f"Stage {stage_name} reached max turns ({max_turns}) without completing",
     })
     return False
 
@@ -865,6 +915,8 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                     (None if budget_overridden else budget_cny), base_cost,
                     stage_def.get("produces"),
                     resume_messages, sample_iteration,
+                    max_turns=stage_def.get("max_turns", MAX_TURNS),
+                    temperature=stage_def.get("temperature", 0.7),
                 )
                 resume_messages = None
             except BudgetExceededError:
@@ -883,6 +935,12 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
             _emit(job_id, {"type": "stage_retry", "stage": stage_name, "round": _round + 1})
             _round += 1
             sample_iteration = 0   # a genuine retry starts a fresh conversation
+            # Fold the last failure into feedback so the retry's brand-new
+            # conversation at least knows what went wrong last time, instead
+            # of reproducing the identical outcome up to MAX_ROUNDS times.
+            last_error = _last_failure_message(job_id, stage_name)
+            if last_error:
+                feedback = f"Your previous attempt at this stage failed: {last_error}"
 
         if not success:
             job_store.update(job_id, status="failed", current_stage=stage_name)
@@ -993,6 +1051,8 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                             (None if budget_overridden else budget_cny), base_cost,
                             stage_def.get("produces"),
                             resume_messages, sample_iteration,
+                            max_turns=stage_def.get("max_turns", MAX_TURNS),
+                            temperature=stage_def.get("temperature", 0.7),
                         )
                         resume_messages = None
                         break

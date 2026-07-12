@@ -12,11 +12,14 @@ both the OpenAI SDK (pointing at MaaS) and Anthropic SDK.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 import uuid
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Add OpenMontage root to path so we can import tools/lib
 OM_ROOT = Path(__file__).parent.parent.parent.parent
@@ -239,7 +242,21 @@ def execute_tool(
     base_cost: float = 0.0,           # cost already spent before this run (retries)
     options: dict[str, Any] | None = None,  # job-level options (model choices, variants)
 ) -> str:
-    """Execute a tool call and return a string result for the agent."""
+    """Execute a tool call and return a string result for the agent.
+
+    Two deliberately different result shapes coexist here: cheap validation
+    failures (missing/invalid params, unknown tool, path containment,
+    _enforce_model_choice's rejection) return a plain "ERROR: ..." string,
+    while a call that actually reached the underlying tool returns
+    JSON (`{"success": true/false, ...}`) because that path carries
+    structured data (result.data/artifacts/cost_usd) a bare string can't
+    express. Both are read as natural-language tool output by the LLM either
+    way, so this isn't a functional gap — flagged here because a repo-wide
+    grep for "ERROR" pattern-matches many existing tests that assert the
+    plain-string shape for the validation-error paths specifically;
+    mechanically unifying the shape would mean rewriting that coverage for a
+    purely cosmetic gain.
+    """
 
     if name == "read_file":
         path = _safe_relative_path(OM_ROOT, args["path"])
@@ -296,7 +313,12 @@ def execute_tool(
             })
 
         from tools.tool_registry import registry
-        registry.discover()
+        # ensure_discovered() only actually re-scans the package tree once
+        # per process lifetime (memoized via _discovered_packages) — calling
+        # discover() directly here re-walked and re-imported every tools/
+        # submodule on every single tool call, including the dozens per
+        # stage a busy assets run makes.
+        registry.ensure_discovered()
         tool = registry.get(tool_name)
         if not tool:
             return f"ERROR: Tool '{tool_name}' not found in registry"
@@ -397,6 +419,7 @@ def execute_tool(
                 cost_tracker.approve_tool(tool_name)
                 cost_tracker.reserve(entry_id)   # OBSERVE mode never raises
             except Exception:
+                logger.warning("CostTracker.estimate/reserve failed for %s", tool_name, exc_info=True)
                 entry_id = None
 
         result = tool.execute(inputs)
@@ -407,6 +430,7 @@ def execute_tool(
                     entry_id, float(result.cost_usd or 0.0), success=result.success
                 )
             except Exception:
+                logger.warning("CostTracker.reconcile failed for %s (entry %s)", tool_name, entry_id, exc_info=True)
                 pass
 
         if result.success:
