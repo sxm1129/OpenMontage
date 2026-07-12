@@ -105,4 +105,4 @@ def test_registry_discovers_music_library():
     # Top-level capability family lookup.
     assert reg.get_by_capability("music_library")[0].name == "music_library"
     # Granular capability declared in capabilities[].
-    assert reg.find_by_capability("list_user_music_tracks")[0].name == "music_library"
+    assert reg.find_by_capabilities("list_user_music_tracks")[0].name == "music_library"

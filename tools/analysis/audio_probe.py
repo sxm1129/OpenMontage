@@ -67,7 +67,7 @@ class AudioProbe(BaseTool):
     determinism = Determinism.DETERMINISTIC
     runtime = ToolRuntime.LOCAL
 
-    dependencies = ["binary:ffprobe"]
+    dependencies = ["cmd:ffprobe"]
     install_instructions = (
         "Install ffmpeg (includes ffprobe):\n"
         "  Windows: winget install ffmpeg\n"

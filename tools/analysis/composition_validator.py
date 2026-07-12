@@ -43,7 +43,7 @@ class CompositionValidator(BaseTool):
     determinism = Determinism.DETERMINISTIC
     runtime = ToolRuntime.LOCAL
 
-    dependencies = ["binary:ffprobe"]
+    dependencies = ["cmd:ffprobe"]
     install_instructions = "Requires ffprobe on PATH (part of ffmpeg)."
 
     capabilities = ["validate_composition", "pre_render_check"]

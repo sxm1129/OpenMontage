@@ -46,7 +46,7 @@ class AudioEnergy(BaseTool):
     determinism = Determinism.DETERMINISTIC
     runtime = ToolRuntime.LOCAL
 
-    dependencies = ["binary:ffmpeg"]
+    dependencies = ["cmd:ffmpeg"]
     install_instructions = (
         "Install ffmpeg:\n"
         "  Windows: winget install ffmpeg\n"

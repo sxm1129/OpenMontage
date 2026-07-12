@@ -6,6 +6,7 @@ interface for discovery, execution, cost estimation, and health reporting.
 
 from __future__ import annotations
 
+import copy
 import functools
 import hashlib
 import inspect
@@ -234,6 +235,43 @@ class BaseTool(ABC):
         if impl is not None and not getattr(impl, "__isabstractmethod__", False):
             cls.execute = _instrument_execute(impl)
 
+    # List/dataclass contract attributes that must not be shared as the same
+    # object across sibling instances -- see __init__.
+    _LIST_DEFAULTS_TO_ISOLATE = (
+        "dependencies", "capabilities", "best_for", "not_good_for",
+        "side_effects", "fallback_tools", "agent_skills",
+        "user_visible_verification", "idempotency_key_fields",
+    )
+    _DATACLASS_DEFAULTS_TO_ISOLATE = ("resource_profile", "retry_policy")
+
+    def __init__(self) -> None:
+        """Give each instance its own copy of the mutable contract defaults.
+
+        The attributes named above are declared at the class level so
+        subclasses can override them with a plain assignment, but any
+        subclass left at a BaseTool default would otherwise share the exact
+        same list/dataclass object with every sibling subclass that also
+        didn't override it -- mutating one in place would leak across tools.
+        Copying here (whatever value -- BaseTool's default or a subclass's
+        override -- is currently on the class) keeps that ergonomic while
+        giving each instance independent storage.
+
+        A few selector subclasses (e.g. tts_selector) instead expose one of
+        these names as a computed `@property` (built from live registry
+        state). Those are skipped: copying would either recurse into the
+        property or raise on the assignment, and there's nothing to isolate
+        since the property recomputes fresh on every access anyway.
+        """
+        cls = type(self)
+        for attr_name in self._LIST_DEFAULTS_TO_ISOLATE:
+            if isinstance(getattr(cls, attr_name, None), property):
+                continue
+            setattr(self, attr_name, list(getattr(self, attr_name)))
+        for attr_name in self._DATACLASS_DEFAULTS_TO_ISOLATE:
+            if isinstance(getattr(cls, attr_name, None), property):
+                continue
+            setattr(self, attr_name, copy.deepcopy(getattr(self, attr_name)))
+
     # --- Identity (override in subclasses) ---
     name: str = ""
     version: str = "0.1.0"
@@ -324,6 +362,11 @@ class BaseTool(ABC):
                     raise DependencyError(
                         f"Python module {module_name!r} not installed. {self.install_instructions}"
                     )
+            else:
+                raise DependencyError(
+                    f"Unrecognized dependency prefix in {dep!r} on tool {self.name!r}. "
+                    "Expected one of 'cmd:', 'env:', 'python:'."
+                )
 
     def get_info(self) -> dict[str, Any]:
         """Return full tool contract info for registry/discovery."""

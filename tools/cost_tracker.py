@@ -346,7 +346,7 @@ class CostTracker:
         # Music
         music_plan = tool_plan.get("music", {})
         if music_plan:
-            music_cost = music_plan.get("cost_per_track", 0.0)
+            music_cost = music_plan.get("cost_per_track", 0.10)
             line_items.append({
                 "category": "music",
                 "provider": music_plan.get("tool", "unknown"),

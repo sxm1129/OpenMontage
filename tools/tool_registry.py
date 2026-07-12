@@ -31,6 +31,8 @@ _UNICODE_DASH_REPLACEMENTS = {
 }
 
 
+# Post-hoc fix: narrow helper that keeps the registry output stdout-safe on
+# Windows cp1252 without imposing a new style rule on every tool author.
 def _scrub_unicode_dashes(value: Any) -> Any:
     """Recursively normalize unicode punctuation in str leaves to ASCII.
 
@@ -60,9 +62,34 @@ class ToolRegistry:
         self._discovered_packages: set[str] = set()
 
     def register(self, tool: BaseTool) -> None:
-        """Register a tool instance."""
+        """Register a tool instance.
+
+        Re-registering the same tool class under its own name is allowed
+        (discover() does this whenever it's called again, e.g. tool_bridge
+        re-discovering on every call) since that's idempotent. Two
+        different tool classes declaring the same `name` is a real
+        collision -- almost always a copy-pasted `name` attribute -- so
+        that raises instead of letting the second one silently clobber
+        the first in self._tools.
+
+        "Same class" is compared by qualified name (module + qualname)
+        rather than object identity: a test reloading a tool module with
+        importlib.reload() produces a fresh class object for the same
+        module/class name, and that must still count as a re-registration,
+        not a collision.
+        """
         if not tool.name:
             raise ValueError("Tool must have a non-empty name")
+        existing = self._tools.get(tool.name)
+        if existing is not None:
+            existing_qualname = f"{type(existing).__module__}.{type(existing).__qualname__}"
+            new_qualname = f"{type(tool).__module__}.{type(tool).__qualname__}"
+            if existing_qualname != new_qualname:
+                raise ValueError(
+                    f"Tool name {tool.name!r} is already registered by "
+                    f"{existing_qualname}; refusing to overwrite it with "
+                    f"{new_qualname}"
+                )
         self._tools[tool.name] = tool
 
     def clear(self) -> None:
@@ -83,41 +110,11 @@ class ToolRegistry:
             registered.append(tool.name)
         return registered
 
-    @staticmethod
-    def _load_dotenv() -> None:
-        """Load .env file into os.environ if present, so tools can find API keys."""
-        from pathlib import Path
-        import os
-        env_path = Path(__file__).resolve().parent.parent / ".env"
-        if not env_path.is_file():
-            return
-        import re
-        with open(env_path, encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip()
-                # Quoted value: take the content inside the quotes verbatim.
-                if value[:1] in ("'", '"'):
-                    quote = value[0]
-                    end = value.find(quote, 1)
-                    value = value[1:end] if end != -1 else value[1:]
-                else:
-                    # Strip an inline comment ('#' at line start or after
-                    # whitespace) so "KEY=   # note" yields "" not "# note".
-                    match = re.search(r"(^|\s)#", value)
-                    if match:
-                        value = value[: match.start()]
-                    value = value.strip()
-                if key and key not in os.environ:
-                    os.environ[key] = value
-
     def discover(self, package_name: str = "tools") -> list[str]:
         """Import a package tree and register any concrete tools it defines."""
-        self._load_dotenv()
+        # base_tool.py loads .env into os.environ at import time; importing
+        # BaseTool above (this module's top-level import) already triggered
+        # it, so there's nothing to load here.
         package = importlib.import_module(package_name)
         discovered: list[str] = []
         package_paths = getattr(package, "__path__", None)
@@ -151,7 +148,12 @@ class ToolRegistry:
         return [t for t in self._tools.values() if t.tier == tier]
 
     def get_by_capability(self, capability: str) -> list[BaseTool]:
-        """Get all tools registered for a top-level capability family."""
+        """Get all tools registered for a top-level capability family.
+
+        Matches the singular `tool.capability` field. See
+        find_by_capabilities() for matching against the plural
+        `tool.capabilities` tag list instead.
+        """
         return [t for t in self._tools.values() if t.capability == capability]
 
     def get_by_provider(self, provider: str) -> list[BaseTool]:
@@ -174,8 +176,13 @@ class ToolRegistry:
         """Get all tools at a given stability level."""
         return [t for t in self._tools.values() if t.stability == stability]
 
-    def find_by_capability(self, capability: str) -> list[BaseTool]:
-        """Find tools that declare a given capability."""
+    def find_by_capabilities(self, capability: str) -> list[BaseTool]:
+        """Find tools whose `capabilities` list contains a given tag.
+
+        Distinct from get_by_capability(), which matches the singular
+        top-level `capability` family field instead of this plural,
+        multi-valued `capabilities` tag list.
+        """
         return [
             t for t in self._tools.values()
             if capability in t.capabilities
@@ -253,6 +260,7 @@ class ToolRegistry:
         {
             "video_generation": {
                 "available": [{"name": ..., "provider": ..., "best_for": ...}],
+                "degraded": [{"name": ..., "provider": ..., "install_instructions": ...}],
                 "unavailable": [{"name": ..., "provider": ..., "install_instructions": ...}],
                 "total": 12,
                 "configured": 2,
@@ -273,7 +281,13 @@ class ToolRegistry:
         for tool in tools:
             cap = tool.capability
             if cap not in menu:
-                menu[cap] = {"available": [], "unavailable": [], "total": 0, "configured": 0}
+                menu[cap] = {
+                    "available": [],
+                    "degraded": [],
+                    "unavailable": [],
+                    "total": 0,
+                    "configured": 0,
+                }
 
             info = tool.get_info()
             status = tool.get_status()
@@ -290,6 +304,7 @@ class ToolRegistry:
                 "source_provider_menu",
                 "source_provider_summary",
                 "render_engines",
+                "hyperframes_runtime",
                 "remotion_note",
                 "provider_matrix",
                 "setup_offer",
@@ -303,12 +318,15 @@ class ToolRegistry:
             if status == ToolStatus.AVAILABLE:
                 menu[cap]["available"].append(entry)
                 menu[cap]["configured"] += 1
+            elif status == ToolStatus.DEGRADED:
+                menu[cap]["degraded"].append(entry)
             else:
                 menu[cap]["unavailable"].append(entry)
             menu[cap]["total"] += 1
 
         for bucket in menu.values():
             bucket["available"].sort(key=lambda entry: (entry["provider"], entry["name"]))
+            bucket["degraded"].sort(key=lambda entry: (entry["provider"], entry["name"]))
             bucket["unavailable"].sort(key=lambda entry: (entry["provider"], entry["name"]))
 
         return dict(sorted(menu.items()))
@@ -353,40 +371,51 @@ class ToolRegistry:
         self.ensure_discovered()
         menu = self.provider_menu()
 
-        # Composition runtimes — lift from video_compose.get_info() since
-        # they're the signal the runtime-selection contract depends on.
+        # Composition runtimes / hyperframes warnings — these aren't looked up
+        # by hardcoded tool name; any tool's get_info() entry carrying a
+        # "render_engines" or "hyperframes_runtime" key opts into reporting
+        # them here, same auto-discovery contract as the rest of the registry.
         comp_runtimes: dict[str, bool] = {}
         runtime_warnings: list[str] = []
-        vc = self._tools.get("video_compose")
-        if vc is not None:
-            info = vc.get_info()
-            engines = info.get("render_engines") or {}
-            comp_runtimes = {k: bool(v) for k, v in engines.items()}
-        # If hyperframes_compose is registered, surface its npm-resolve reasons
-        # explicitly — those are the "looks available but isn't" failures.
-        hf = self._tools.get("hyperframes_compose")
-        if hf is not None:
-            hf_info = hf.get_info()
-            rc = hf_info.get("hyperframes_runtime") or {}
-            for reason in rc.get("reasons") or []:
-                runtime_warnings.append(f"hyperframes: {reason}")
+        all_entries = [
+            entry
+            for bucket in menu.values()
+            for entry in bucket.get("available", [])
+            + bucket.get("degraded", [])
+            + bucket.get("unavailable", [])
+        ]
+        for entry in all_entries:
+            if not comp_runtimes and "render_engines" in entry:
+                engines = entry.get("render_engines") or {}
+                comp_runtimes = {k: bool(v) for k, v in engines.items()}
+            # Surface npm-resolve reasons explicitly — those are the
+            # "looks available but isn't" failures.
+            if "hyperframes_runtime" in entry:
+                rc = entry.get("hyperframes_runtime") or {}
+                for reason in rc.get("reasons") or []:
+                    runtime_warnings.append(f"hyperframes: {reason}")
 
         # Capabilities rollup (configured/total + provider lists).
         # When a provider has multiple tools (e.g. seedance-fal and
         # seedance-replicate both reporting provider="seedance"), a
         # naive set-split shows the provider in BOTH available and
         # unavailable — confusing for users. Dedupe: if the provider has
-        # any available tool, do NOT list it as unavailable.
+        # any available tool, do NOT list it as unavailable. A degraded
+        # tool's provider is folded into unavailable_providers (it isn't
+        # fully working) unless that same provider also has a fully
+        # available tool.
         capabilities: list[dict[str, Any]] = []
         for cap, bucket in menu.items():
             available_providers = {
                 e.get("provider") for e in bucket.get("available", [])
             } - {None}
+            degraded_providers = {
+                e.get("provider") for e in bucket.get("degraded", [])
+            } - {None}
             unavailable_providers = (
                 {e.get("provider") for e in bucket.get("unavailable", [])}
-                - {None}
-                - available_providers  # provider with any available tool wins
-            )
+                | degraded_providers
+            ) - {None} - available_providers  # provider with any available tool wins
             capabilities.append(
                 {
                     "capability": cap,
@@ -450,7 +479,11 @@ class ToolRegistry:
                         }
                     )
 
-            for entry in bucket.get("available", []) + bucket.get("unavailable", []):
+            for entry in (
+                bucket.get("available", [])
+                + bucket.get("degraded", [])
+                + bucket.get("unavailable", [])
+            ):
                 if entry.get("resource_profile_note"):
                     runtime_warnings.append(
                         f"{entry.get('name')}: {entry.get('resource_profile_note')}"
@@ -469,9 +502,6 @@ class ToolRegistry:
         # Markdown docs keep their typographic dashes; this only touches the
         # runtime-reported strings.
         return _scrub_unicode_dashes(result)
-
-    # Post-hoc fix: narrow helper that keeps the registry output stdout-safe on
-    # Windows cp1252 without imposing a new style rule on every tool author.
 
     def gpu_required_tools(self) -> list[str]:
         """List tools that require GPU (VRAM > 0)."""
