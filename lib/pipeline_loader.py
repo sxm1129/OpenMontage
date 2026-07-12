@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,10 +32,51 @@ def _load_manifest_schema() -> dict:
         return json.load(f)
 
 
-@lru_cache(maxsize=64)
+# name/defs_dir_key -> (mtime_at_load, parsed manifest dict)
+_pipeline_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_pipeline_cache_lock = threading.Lock()
+
+
 def _load_pipeline_cached(name: str, defs_dir_key: str) -> dict[str, Any]:
-    """Cached manifest load. Treat the returned dict as READ-ONLY."""
-    return load_pipeline(name, Path(defs_dir_key) if defs_dir_key else None)
+    """Mtime-aware cached manifest load. Treat the returned dict as READ-ONLY.
+
+    A bare ``lru_cache`` has no invalidation: if an operator hotfixes a
+    ``pipeline_defs/*.yaml`` manifest (e.g. flips ``human_approval_default``
+    for a stage) while the server process is still running long-lived jobs,
+    every subsequent gate check (``lib/checkpoint.py`` routes through this on
+    every checkpoint write -- a genuine hot path) would keep using the stale
+    in-memory manifest until a full process restart, which would also kill
+    any in-flight pipeline.
+
+    Instead, this stats the YAML file's mtime on every call. If it matches
+    the mtime recorded when the cache entry was built, the cached parse is
+    returned as-is (no re-read, no re-validation -- the common case stays
+    cheap). If the mtime differs -- including the first call for a given
+    name/defs_dir -- the manifest is reloaded and re-validated and the cache
+    entry is refreshed, so a live hotfix takes effect on the very next call
+    with no restart required.
+    """
+    defs_dir = Path(defs_dir_key) if defs_dir_key else PIPELINE_DEFS_DIR
+    path = defs_dir / f"{name}.yaml"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        # Let load_pipeline() raise its own FileNotFoundError with a clear
+        # message rather than caching around a missing file.
+        return load_pipeline(name, Path(defs_dir_key) if defs_dir_key else None)
+
+    cache_key = (name, defs_dir_key)
+    with _pipeline_cache_lock:
+        cached = _pipeline_cache.get(cache_key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+
+    manifest = load_pipeline(name, Path(defs_dir_key) if defs_dir_key else None)
+
+    with _pipeline_cache_lock:
+        _pipeline_cache[cache_key] = (mtime, manifest)
+
+    return manifest
 
 
 def load_pipeline_readonly(name: str, defs_dir: Optional[Path] = None) -> dict[str, Any]:
