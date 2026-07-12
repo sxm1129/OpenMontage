@@ -206,14 +206,17 @@ Stage director skills teach the agent HOW to execute each pipeline stage. Each s
 
 | Skill | File | Stage | Key Capabilities |
 |-------|------|-------|-----------------|
-| **Executive Producer** | `pipelines/cinematic/executive-producer.md` | `all` | **7-stage serial orchestration, emotional pacing gates, color consistency, audio dynamics** |
-| Idea Director | `pipelines/cinematic/idea-director.md` | `idea` | Emotional arc selection, source truth, delivery-shape planning |
+| **Executive Producer** | `pipelines/cinematic/executive-producer.md` | `all` | **8-stage serial orchestration, emotional pacing gates, color consistency, audio dynamics** |
+| **Research Director** | `pipelines/cinematic/research-director.md` | `research` | **Visual reference research, mood/emotional-language gathering, sound-design and motion precedent scouting** |
+| **Proposal Director** | `pipelines/cinematic/proposal-director.md` | `proposal` | **Runtime selection (Remotion vs HyperFrames), concept direction, approval gate before any spend** |
 | Script Director | `pipelines/cinematic/script-director.md` | `script` | Beat mapping, dialogue selects, title-card restraint |
 | Scene Director | `pipelines/cinematic/scene-director.md` | `scene_plan` | Hero-frame planning, reveal structure, transition limits |
 | Asset Director | `pipelines/cinematic/asset-director.md` | `assets` | Source selects, support-insert discipline, music/ambience planning |
 | Edit Director | `pipelines/cinematic/edit-director.md` | `edit` | Emotion-first pacing, reveal timing, audio-driven rhythm |
 | Compose Director | `pipelines/cinematic/compose-director.md` | `compose` | Grade and mix finishing, frame-treatment judgment |
 | Publish Director | `pipelines/cinematic/publish-director.md` | `publish` | Hero vs teaser packaging, poster-frame concepts |
+
+> **Note:** The old `idea-director.md` still exists for reference (moved to `_legacy/`) but is superseded by the research + proposal two-stage flow in v2.0.
 
 ### Animation Pipeline (`pipelines/animation/`) — v2.0
 
