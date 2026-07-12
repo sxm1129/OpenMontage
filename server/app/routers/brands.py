@@ -27,13 +27,28 @@ BRAND_KITS_DIR = OM_ROOT / "brand_kits"
 # disk rather than relying on the runner-side size cap to catch it later.
 _REFERENCE_IMAGE_MAX_DIMENSION = 768
 
+# Explicit cap on the raw upload body, enforced BEFORE it's fully read into
+# memory and handed to PIL for decoding. Without this, an arbitrarily large
+# (or maliciously crafted decompression-bomb) upload gets read + decoded in
+# full before the post-decode resize ever has a chance to shrink it.
+_REFERENCE_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
 router = APIRouter()
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _slug(name: str) -> str:
-    return re.sub(r"[^a-z0-9一-鿿]+", "-", name.lower()).strip("-")
+    # Unicode-aware: keep any letter/number character (str.isalnum(), which
+    # covers Latin, CJK, Korean/Japanese, Cyrillic, Arabic, etc.), collapsing
+    # everything else (spaces, punctuation, emoji) to a single hyphen. A
+    # hardcoded "[^a-z0-9<CJK-range>]" allowlist collapsed any other script
+    # (Korean, Japanese kana, Cyrillic, Arabic, emoji) entirely to hyphens,
+    # leaving a kit_id that's just a random hex suffix with no trace of the
+    # brand name.
+    lowered = name.lower()
+    slug = "".join(ch if ch.isalnum() else "-" for ch in lowered)
+    return re.sub(r"-+", "-", slug).strip("-")
 
 
 def _kit_path(kit_id: str) -> Path:
@@ -151,17 +166,37 @@ async def delete_brand_kit(kit_id: str):
 async def upload_reference_image(kit_id: str, file: UploadFile):
     """Upload/replace this kit's reference image (used for character/product
     consistency across generated shots — see stage_runner.py's
-    _brand_reference_image_data_uri). Resized to at most
-    _REFERENCE_IMAGE_MAX_DIMENSION per side and always re-saved as PNG, so
-    the file this endpoint writes is already safely small for the base64
-    data URI it becomes at generation time — no separate size check needed
-    downstream for anything uploaded through this path.
+    _brand_reference_image_data_uri). The raw upload is capped at
+    _REFERENCE_IMAGE_MAX_BYTES before it's ever fully read/decoded, then the
+    decoded image is resized to at most _REFERENCE_IMAGE_MAX_DIMENSION per
+    side and always re-saved as PNG — so the file this endpoint writes is
+    already safely small for the base64 data URI it becomes at generation
+    time, and no separate size check is needed downstream for anything
+    uploaded through this path.
     """
     kit = _load(kit_id)
     if not kit:
         raise HTTPException(404, "Brand kit not found")
 
-    raw = await file.read()
+    # Read in bounded chunks and bail out as soon as the cap is exceeded,
+    # rather than trusting a (spoofable, sometimes absent) Content-Length
+    # header — this guarantees we never hold more than
+    # _REFERENCE_IMAGE_MAX_BYTES + one chunk in memory before rejecting.
+    chunks: list[bytes] = []
+    total = 0
+    chunk_size = 1024 * 1024
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _REFERENCE_IMAGE_MAX_BYTES:
+            raise HTTPException(
+                400,
+                f"Reference image too large (max {_REFERENCE_IMAGE_MAX_BYTES // (1024 * 1024)}MB)",
+            )
+        chunks.append(chunk)
+    raw = b"".join(chunks)
     if not raw:
         raise HTTPException(400, "Empty file")
 

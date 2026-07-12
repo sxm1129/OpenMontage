@@ -22,13 +22,24 @@ async def list_pipelines_endpoint():
             logger.warning("Failed to load pipeline manifest %r", name, exc_info=True)
             continue
         stages = m.get("stages", [])
+        # A stage dict missing "name" (schema drift in a hand-edited manifest,
+        # or the lenient raw-YAML fallback in load_manifest) must not raise
+        # here — an unguarded KeyError on one malformed manifest would 500 the
+        # ENTIRE /pipelines list, hiding every other, valid pipeline too.
+        stage_names = []
+        for s in stages:
+            stage_name = s.get("name")
+            if stage_name is None:
+                logger.warning("Pipeline %r has a stage with no 'name': %r", name, s)
+                continue
+            stage_names.append(stage_name)
         out.append({
             "name": name,
             "description": (m.get("description") or "").strip(),
             "category": m.get("category"),
             "stability": m.get("stability"),
-            "stages": [s["name"] for s in stages],
-            "approval_stages": [s["name"] for s in stages if s.get("human_approval_default")],
+            "stages": stage_names,
+            "approval_stages": [s.get("name") for s in stages if s.get("name") and s.get("human_approval_default")],
         })
     return {"pipelines": out}
 
@@ -43,13 +54,19 @@ async def get_pipeline(name: str):
     except Exception as exc:
         raise HTTPException(400, f"Failed to load pipeline '{name}': {exc}")
     stages = m.get("stages", [])
+    # Same guard as the list endpoint above: a stage dict missing "name" must
+    # degrade gracefully (skip + log), not KeyError the whole request.
+    stage_entries = []
+    for s in stages:
+        stage_name = s.get("name")
+        if stage_name is None:
+            logger.warning("Pipeline %r has a stage with no 'name': %r", name, s)
+            continue
+        stage_entries.append({"name": stage_name, "approval": bool(s.get("human_approval_default", False))})
     return {
         "name": name,
         "description": (m.get("description") or "").strip(),
         "category": m.get("category"),
         "stability": m.get("stability"),
-        "stages": [
-            {"name": s["name"], "approval": bool(s.get("human_approval_default", False))}
-            for s in stages
-        ],
+        "stages": stage_entries,
     }

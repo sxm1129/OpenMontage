@@ -229,10 +229,25 @@ class JobStore:
     # ---- Approval gate ----
 
     def set_approval(self, job_id: str, action: str, feedback: str) -> bool:
-        job = self.get(job_id)
-        if not job or job.get("status") != "awaiting_approval":
-            return False
+        """Record the human's approve/reject decision for a job's approval gate.
+
+        The status check and the result write must happen atomically under
+        one lock acquisition: two near-simultaneous POST /approve calls both
+        read status=="awaiting_approval" (it doesn't change until
+        wait_for_approval's caller advances the pipeline, which happens well
+        after this returns), so without a single lock spanning check-then-write
+        both calls would pass the check and the second write would silently
+        clobber the first's decision before wait_for_approval ever consumes
+        it. Treating an already-pending (not yet consumed) result as
+        "resolved" for any later caller makes the second of two racing calls
+        return False instead of silently discarding the first action.
+        """
         with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or job.get("status") != "awaiting_approval":
+                return False
+            if job_id in self._approval_results:
+                return False
             self._approval_results[job_id] = {"action": action, "feedback": feedback}
         ev = self._approval_events.get(job_id)
         if ev:

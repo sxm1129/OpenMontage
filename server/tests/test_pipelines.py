@@ -85,6 +85,49 @@ def test_drifted_pipeline_resolves_own_stages():
     assert sd and sd != [s["name"] for s in CINEMATIC_STAGES]
 
 
+def test_stage_missing_name_degrades_gracefully_not_500(monkeypatch, caplog):
+    # Regression: the try/except in list_pipelines_endpoint only wrapped
+    # load_manifest() -- the subsequent `[s["name"] for s in stages]` ran
+    # unguarded, so a manifest with a stage missing "name" (e.g. schema drift,
+    # or the lenient raw-YAML fallback) would KeyError and 500 the ENTIRE
+    # /pipelines list, not just that one pipeline.
+    import app.pipeline_catalog as pc
+    real_load_manifest = pc.load_manifest
+
+    def drifted(name):
+        m = real_load_manifest(name)
+        if name == "cinematic":
+            m = dict(m)
+            m["stages"] = [{"human_approval_default": True}, *m.get("stages", [])]
+        return m
+
+    monkeypatch.setattr(pc, "load_manifest", drifted)
+    with caplog.at_level("WARNING"):
+        r = client.get("/pipelines")
+    assert r.status_code == 200
+    pipes = {p["name"]: p for p in r.json()["pipelines"]}
+    assert "cinematic" in pipes
+    assert None not in pipes["cinematic"]["stages"]
+    assert any("cinematic" in rec.getMessage() for rec in caplog.records)
+
+
+def test_stage_missing_name_degrades_gracefully_on_detail_endpoint(monkeypatch):
+    import app.pipeline_catalog as pc
+    real_load_manifest = pc.load_manifest
+
+    def drifted(name):
+        m = real_load_manifest(name)
+        if name == "cinematic":
+            m = dict(m)
+            m["stages"] = [{"human_approval_default": True}, *m.get("stages", [])]
+        return m
+
+    monkeypatch.setattr(pc, "load_manifest", drifted)
+    r = client.get("/pipelines/cinematic")
+    assert r.status_code == 200
+    assert all("name" in s for s in r.json()["stages"])
+
+
 def test_pipeline_detail_endpoint_and_404():
     ok = client.get("/pipelines/cinematic")
     assert ok.status_code == 200

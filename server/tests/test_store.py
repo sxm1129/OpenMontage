@@ -180,3 +180,39 @@ async def test_approval_timeout_defaults_to_reject(store):
     store.update("j", status="awaiting_approval")
     result = await store.wait_for_approval("j", timeout=0.05)
     assert result["action"] == "reject"
+
+
+async def test_set_approval_second_racing_call_does_not_clobber_first(store):
+    # Regression: set_approval used to read status and write the result
+    # without a lock spanning both -- two near-simultaneous approve calls
+    # could both observe status=="awaiting_approval" (it doesn't flip until
+    # wait_for_approval's caller advances the pipeline, well after this
+    # returns), so the second write would silently clobber the first's
+    # decision before wait_for_approval ever consumed it.
+    store.create("j", {})
+    store.update("j", status="awaiting_approval")
+
+    assert store.set_approval("j", "approve", "first") is True
+    # Second call arrives before wait_for_approval has consumed the first
+    # result -- status is still "awaiting_approval", but must be rejected,
+    # not silently accepted and overwrite the pending decision.
+    assert store.set_approval("j", "reject", "second") is False
+
+    result = await store.wait_for_approval("j", timeout=1.0)
+    assert result == {"action": "approve", "feedback": "first"}
+
+
+async def test_set_approval_allows_a_new_decision_after_the_first_is_consumed(store):
+    # Once wait_for_approval consumes a decision, a fresh approval cycle
+    # (e.g. after the pipeline re-enters awaiting_approval for the next
+    # gated stage) must be accepted again -- the "already resolved" guard is
+    # per-pending-result, not a permanent lockout for the job.
+    store.create("j", {})
+    store.update("j", status="awaiting_approval")
+    assert store.set_approval("j", "approve", "first") is True
+    await store.wait_for_approval("j", timeout=1.0)
+
+    store.update("j", status="awaiting_approval")
+    assert store.set_approval("j", "reject", "second") is True
+    result = await store.wait_for_approval("j", timeout=1.0)
+    assert result == {"action": "reject", "feedback": "second"}

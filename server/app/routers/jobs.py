@@ -106,6 +106,15 @@ async def get_job(job_id: str):
 async def approve_stage(job_id: str, req: ApproveStageRequest):
     ok = job_store.set_approval(job_id, req.action, req.feedback)
     if not ok:
+        # Distinguish "another request already resolved this gate" (status is
+        # genuinely awaiting_approval, but JobStore.set_approval's
+        # check-then-write lock lost the race to a concurrent approve call)
+        # from the plain "no such job / nothing to approve" case, so a client
+        # that lost a double-click race gets an honest, actionable message
+        # instead of vanishing behind the same 404 as a missing job.
+        job = job_store.get(job_id)
+        if job and job.get("status") == "awaiting_approval":
+            raise HTTPException(409, "This job's approval gate was already resolved by another request")
         raise HTTPException(404, "Job not found or not awaiting approval")
     return {"job_id": job_id, "action": req.action}
 

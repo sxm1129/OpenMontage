@@ -10,6 +10,12 @@ from app.store import job_store, TERMINAL_STATUSES
 
 router = APIRouter()
 
+# How often to emit an SSE keep-alive comment during silent stretches (a long
+# pipeline stage with no events to push). Without this, a reverse proxy or
+# load balancer's idle-connection timeout can drop the connection during a
+# quiet stage even though the job itself is still healthy.
+_HEARTBEAT_INTERVAL = 15.0
+
 
 @router.get("/{job_id}/events")
 async def job_events(job_id: str, lastEventId: int = -1):
@@ -22,6 +28,7 @@ async def job_events(job_id: str, lastEventId: int = -1):
     async def generator():
         seq = lastEventId
         last_type = None
+        last_activity = time.time()
         while True:
             events = job_store.get_events(job_id, after_seq=seq)
             for ev in events:
@@ -29,6 +36,8 @@ async def job_events(job_id: str, lastEventId: int = -1):
                 last_type = ev.get("type")
                 data = json.dumps(ev, ensure_ascii=False)
                 yield f"id: {seq}\ndata: {data}\n\n"
+            if events:
+                last_activity = time.time()
             # Only decide to close AFTER draining the whole batch just
             # fetched — never mid-batch. A full replay (or any reconnect
             # spanning more than one retry cycle) can contain an OLD
@@ -83,6 +92,16 @@ async def job_events(job_id: str, lastEventId: int = -1):
                 # The batch we just delivered genuinely ends on a real
                 # terminal event (not an old one buried mid-batch) — done.
                 return
+            # No new events this tick and the job is still in flight: a long
+            # silent stage (no stage_started/progress events for minutes)
+            # would otherwise leave the connection producing nothing at all,
+            # risking an idle-timeout disconnect behind a reverse proxy. An
+            # SSE comment line (leading ":") is invisible to EventSource's
+            # onmessage but keeps the socket demonstrably alive.
+            now = time.time()
+            if now - last_activity >= _HEARTBEAT_INTERVAL:
+                last_activity = now
+                yield ": heartbeat\n\n"
             await asyncio.sleep(0.5)
 
     return StreamingResponse(

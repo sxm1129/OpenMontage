@@ -129,6 +129,23 @@ def test_approve_requires_awaiting(client):
     assert client.post(f"/jobs/{jid}/approve", json={"action": "approve"}).status_code == 404
 
 
+def test_approve_double_submit_gets_409_not_silently_dropped(client):
+    # Regression: two near-simultaneous POST /approve calls both used to pass
+    # JobStore.set_approval's status check before either was consumed, so the
+    # second call's write silently clobbered the first's decision. The second
+    # call must now get a clear "already resolved" response instead of either
+    # succeeding again or looking identical to a plain 404.
+    jid = client.post("/jobs", json=_new_job_body()).json()["job_id"]
+    jobs.job_store.update(jid, status="awaiting_approval")
+
+    r1 = client.post(f"/jobs/{jid}/approve", json={"action": "approve"})
+    assert r1.status_code == 200
+
+    r2 = client.post(f"/jobs/{jid}/approve", json={"action": "reject"})
+    assert r2.status_code == 409
+    assert "already resolved" in r2.json()["detail"].lower()
+
+
 def test_save_artifact_writes_file(client, tmp_path):
     jid = client.post("/jobs", json=_new_job_body(project_name="p1")).json()["job_id"]
     r = client.post(f"/jobs/{jid}/artifact", json={"stage": "script", "content": {"k": 1}})
@@ -275,3 +292,71 @@ def test_reference_image_upload_missing_kit(client):
         files={"file": ("ref.png", _tiny_png_bytes(), "image/png")},
     )
     assert resp.status_code == 404
+
+
+def test_reference_image_upload_rejects_oversized_file(client):
+    # Regression: the upload was read + decoded in full before any size
+    # check, so an arbitrarily large (or decompression-bomb) upload could
+    # exhaust memory before the post-decode resize ever ran.
+    kid = client.post("/brands", json={"brand_name": "Rabbit TV"}).json()["kit_id"]
+    from app.routers.brands import _REFERENCE_IMAGE_MAX_BYTES
+    oversized = b"x" * (_REFERENCE_IMAGE_MAX_BYTES + 1)
+    resp = client.post(
+        f"/brands/{kid}/reference-image",
+        files={"file": ("huge.png", oversized, "image/png")},
+    )
+    assert resp.status_code == 400
+    assert "too large" in resp.json()["detail"].lower()
+
+
+def test_reference_image_upload_accepts_file_right_at_the_cap(client):
+    # Boundary check: exactly at the cap must still be accepted (only
+    # strictly-over is rejected) as long as it's a valid image.
+    kid = client.post("/brands", json={"brand_name": "Rabbit TV"}).json()["kit_id"]
+    resp = client.post(
+        f"/brands/{kid}/reference-image",
+        files={"file": ("ref.png", _tiny_png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 200
+
+
+# ── brand slug: unicode-aware kit_id ─────────────────────────────────────────
+
+def test_slug_keeps_non_latin_scripts_recognizable():
+    from app.routers.brands import _slug
+    # Korean
+    assert _slug("한글 브랜드") == "한글-브랜드"
+    # Japanese
+    assert _slug("ブランド名") == "ブランド名"
+    # Cyrillic
+    assert _slug("Бренд Имя") == "бренд-имя"
+    # Arabic
+    assert _slug("علامة تجارية") not in ("", "-")
+    # Latin still lowercases and collapses punctuation as before
+    assert _slug("Acme, Inc.!") == "acme-inc"
+
+
+def test_brand_kit_id_stays_recognizable_for_korean_name(client):
+    # Regression: _slug only allowed [a-z0-9] plus the CJK Unified Ideographs
+    # block, so a Korean/Japanese/Cyrillic/Arabic/emoji brand name collapsed
+    # entirely to hyphens, leaving a kit_id that's just a random hex suffix
+    # with no trace of the brand name.
+    created = client.post("/brands", json={"brand_name": "한글 브랜드"})
+    assert created.status_code == 201
+    kit_id = created.json()["kit_id"]
+    assert kit_id.startswith("한글-브랜드-")
+
+
+# ── CORS origins ──────────────────────────────────────────────────────────────
+
+def test_cors_origins_defaults_to_localhost_3000(monkeypatch):
+    monkeypatch.delenv("OM_CORS_ORIGINS", raising=False)
+    assert main._cors_origins() == ["http://localhost:3000"]
+
+
+def test_cors_origins_env_override(monkeypatch):
+    # Regression: allow_origins was hardcoded to localhost:3000 with no env
+    # override, so any non-default deployment origin (NEXT_PUBLIC_SERVER_URL
+    # pointed elsewhere) had every browser API call rejected by CORS.
+    monkeypatch.setenv("OM_CORS_ORIGINS", "https://example.com, https://foo.bar ")
+    assert main._cors_origins() == ["https://example.com", "https://foo.bar"]

@@ -1,5 +1,6 @@
 """FastAPI entrypoint for OpenMontage server (Agent execution sidecar)."""
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -10,11 +11,27 @@ from app.routers import jobs, events, health, brands, system, pipelines
 
 OM_ROOT = Path(__file__).parent.parent.parent
 
+
+def _cors_origins() -> list[str]:
+    """Allowed browser origins for CORS, env-overridable (comma-separated).
+
+    The web app calls this server directly from browser JS via
+    NEXT_PUBLIC_SERVER_URL, which is not necessarily localhost:3000 in every
+    deployment. Without an override, any non-default origin gets every
+    browser API call rejected by CORS with no way to fix it short of editing
+    this file. Follows the OM_-style env var pattern used elsewhere
+    (app.interfaces) for storage/queue/auth backend selection.
+    """
+    raw = os.environ.get("OM_CORS_ORIGINS", "")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    return origins or ["http://localhost:3000"]
+
+
 app = FastAPI(title="OpenMontage Server", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
