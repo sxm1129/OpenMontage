@@ -30,8 +30,16 @@ export default function BrandsPage() {
   const [saving, setSaving] = useState(false);
   const [refImageFile, setRefImageFile] = useState<File | null>(null);
   const [refImagePreview, setRefImagePreview] = useState<string | null>(null);
+  // The backend always writes a re-uploaded reference image to the same
+  // fixed relative path, so a fresh upload returns a byte-identical URL to
+  // the one already in state — the <img> never re-fetches. Bumping this on
+  // every successful upload gives the <img src> a query param that changes
+  // even when the underlying path doesn't.
+  const [refImageVersion, setRefImageVersion] = useState(0);
   const [uploadingRefImage, setUploadingRefImage] = useState(false);
   const [refImageError, setRefImageError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
 
   function emptyForm() {
     return {
@@ -56,7 +64,9 @@ export default function BrandsPage() {
     setCreating(true);
     setRefImageFile(null);
     setRefImagePreview(null);
+    setRefImageVersion(0);
     setRefImageError(null);
+    setSaveError(null);
   }
 
   function startEdit(kit: BrandKit) {
@@ -74,7 +84,9 @@ export default function BrandsPage() {
     setCreating(true);
     setRefImageFile(null);
     setRefImagePreview(kit.reference_image_path ? `${SERVER}/brand-media/${kit.kit_id}/${kit.reference_image_path}` : null);
+    setRefImageVersion(0);
     setRefImageError(null);
+    setSaveError(null);
   }
 
   async function handleUploadReferenceImage() {
@@ -94,6 +106,7 @@ export default function BrandsPage() {
       }
       const data = await res.json();
       setRefImagePreview(`${SERVER}${data.reference_image_url}`);
+      setRefImageVersion((v) => v + 1);
       setRefImageFile(null);
     } catch {
       setRefImageError("上传失败，请重试");
@@ -105,34 +118,45 @@ export default function BrandsPage() {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
+    setSaveError(null);
     const payload = {
       ...form,
       tone_keywords: form.tone_keywords.split(",").map((s) => s.trim()).filter(Boolean),
       color_palette: form.color_palette.split(",").map((s) => s.trim()).filter(Boolean),
     };
-    if (editing) {
-      await fetch(`${SERVER}/brands/${editing.kit_id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-    } else {
-      await fetch(`${SERVER}/brands`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+    try {
+      if (editing) {
+        await fetch(`${SERVER}/brands/${editing.kit_id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await fetch(`${SERVER}/brands`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
+      await load();
+      setCreating(false);
+      setEditing(null);
+    } catch {
+      setSaveError("保存失败，请检查网络连接后重试");
+    } finally {
+      setSaving(false);
     }
-    await load();
-    setCreating(false);
-    setEditing(null);
-    setSaving(false);
   }
 
   async function handleDelete(kit_id: string) {
     if (!confirm("确定删除？")) return;
-    await fetch(`${SERVER}/brands/${kit_id}`, { method: "DELETE" });
-    await load();
+    setListError(null);
+    try {
+      await fetch(`${SERVER}/brands/${kit_id}`, { method: "DELETE" });
+      await load();
+    } catch {
+      setListError("删除失败，请检查网络连接后重试");
+    }
   }
 
   return (
@@ -199,7 +223,11 @@ export default function BrandsPage() {
                   <div className="flex items-center gap-3">
                     {refImagePreview && (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={refImagePreview} alt="参考图预览" className="w-24 h-24 object-cover rounded border border-border" />
+                      <img
+                        src={refImageVersion > 0 ? `${refImagePreview}?t=${refImageVersion}` : refImagePreview}
+                        alt="参考图预览"
+                        className="w-24 h-24 object-cover rounded border border-border"
+                      />
                     )}
                     <div className="flex flex-col gap-2 items-start">
                       <input
@@ -222,6 +250,7 @@ export default function BrandsPage() {
                   </div>
                 </div>
               )}
+              {saveError && <p className="text-xs text-destructive">{saveError}</p>}
               <div className="flex gap-3 pt-2">
                 <Button type="submit" disabled={saving}>{saving ? "保存中…" : "保存"}</Button>
                 <Button type="button" variant="outline" onClick={() => { setCreating(false); setEditing(null); }}>取消</Button>
@@ -230,6 +259,8 @@ export default function BrandsPage() {
           </CardContent>
         </Card>
       )}
+
+      {listError && <p className="text-xs text-destructive">{listError}</p>}
 
       {/* Kit list */}
       {kits.length === 0 && !creating && (
@@ -254,10 +285,13 @@ export default function BrandsPage() {
                   {kit.slogan && (
                     <p className="text-xs text-muted-foreground mt-0.5 italic">&ldquo;{kit.slogan}&rdquo;</p>
                   )}
-                  <div className="flex gap-3 mt-2 flex-wrap">
+                  <div className="flex gap-3 mt-2 flex-wrap items-center">
                     {kit.tone_keywords.slice(0, 4).map((k) => (
                       <span key={k} className="text-xs bg-muted px-2 py-0.5 rounded-full">{k}</span>
                     ))}
+                    {kit.tone_keywords.length > 4 && (
+                      <span className="text-xs text-muted-foreground">+{kit.tone_keywords.length - 4}</span>
+                    )}
                     {kit.color_palette.slice(0, 4).map((c) => (
                       <span
                         key={c}
@@ -266,6 +300,14 @@ export default function BrandsPage() {
                         title={c}
                       />
                     ))}
+                    {kit.color_palette.length > 4 && (
+                      <span
+                        className="text-xs text-muted-foreground"
+                        title={`还有 ${kit.color_palette.length - 4} 个颜色`}
+                      >
+                        +{kit.color_palette.length - 4}
+                      </span>
+                    )}
                   </div>
                   {kit.target_audience && (
                     <p className="text-xs text-muted-foreground mt-1.5">受众：{kit.target_audience}</p>

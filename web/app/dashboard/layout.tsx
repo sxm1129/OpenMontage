@@ -1,11 +1,5 @@
-import Link from "next/link";
 import { Separator } from "@/components/ui/separator";
-
-const NAV = [
-  { href: "/dashboard", label: "项目" },
-  { href: "/dashboard/brands", label: "品牌库" },
-  { href: "/dashboard/settings", label: "设置" },
-];
+import { DashboardNav } from "@/components/layout/dashboard-nav";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -17,17 +11,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <p className="text-xs text-muted-foreground mt-0.5">AI 视频生产平台</p>
         </div>
         <Separator />
-        <nav className="flex flex-col gap-1">
-          {NAV.map((item) => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className="px-3 py-2 rounded-md text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-            >
-              {item.label}
-            </Link>
-          ))}
-        </nav>
+        <DashboardNav />
       </aside>
 
       {/* Main */}

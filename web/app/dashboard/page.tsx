@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { stageLabel } from "@/components/job-status";
 
 type Job = {
   job_id: string;
@@ -102,7 +103,7 @@ export default function DashboardPage() {
                       </div>
                     )}
                     <span className="text-muted-foreground/40 text-xs">
-                      {job.status === "completed" ? "🎬" : job.current_stage ?? ""}
+                      {job.status === "completed" ? "🎬" : stageLabel(job.current_stage)}
                     </span>
                   </div>
                   <CardHeader className="pb-2">

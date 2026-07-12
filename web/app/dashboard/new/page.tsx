@@ -111,45 +111,50 @@ export default function NewProjectPage() {
     if (!selectedType) return;
     setLoading(true);
 
-    const res = await fetch(`${SERVER}/jobs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project_name: form.projectName || form.brandName.replace(/\s+/g, "-"),
-        content_type: selectedType.id,
-        pipeline: selectedType.pipeline,
-        brand_info: {
-          brand_name: form.brandName,
-          slogan: form.slogan,
-          notes: form.notes,
-        },
-        options: {
-          duration_seconds: parseInt(form.duration),
-          video_model: videoModel,
-          image_model: imageModel,
-          tts_model: ttsModel,
-          ...(compareMode ? { video_model_variants: [videoModel, videoModelB] } : {}),
-          ...(ttsModel === "leapfast/indextts" ? {
-            tts_emotion: {
-              emo_alpha: emoAlpha,
-              use_emo_text: useEmoText,
-              ...(useEmoText && emoText ? { emo_text: emoText } : {}),
-              interval_silence: intervalSilence,
-            },
-          } : {}),
-          ...(form.brandKitId ? { brand_kit_id: form.brandKitId } : {}),
-          ...(form.budgetCny && Number(form.budgetCny) > 0
-            ? { budget_cny: Number(form.budgetCny) }
-            : {}),
-        },
-      }),
-    });
+    try {
+      const res = await fetch(`${SERVER}/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_name: form.projectName || form.brandName.replace(/\s+/g, "-"),
+          content_type: selectedType.id,
+          pipeline: selectedType.pipeline,
+          brand_info: {
+            brand_name: form.brandName,
+            slogan: form.slogan,
+            notes: form.notes,
+          },
+          options: {
+            duration_seconds: parseInt(form.duration),
+            video_model: videoModel,
+            image_model: imageModel,
+            tts_model: ttsModel,
+            ...(compareMode ? { video_model_variants: [videoModel, videoModelB] } : {}),
+            ...(ttsModel === "leapfast/indextts" ? {
+              tts_emotion: {
+                emo_alpha: emoAlpha,
+                use_emo_text: useEmoText,
+                ...(useEmoText && emoText ? { emo_text: emoText } : {}),
+                interval_silence: intervalSilence,
+              },
+            } : {}),
+            ...(form.brandKitId ? { brand_kit_id: form.brandKitId } : {}),
+            ...(form.budgetCny && Number(form.budgetCny) > 0
+              ? { budget_cny: Number(form.budgetCny) }
+              : {}),
+          },
+        }),
+      });
 
-    const data = await res.json();
-    if (res.ok && data.job_id) {
-      router.push(`/dashboard/jobs/${data.job_id}`);
-    } else {
-      alert("创建失败: " + JSON.stringify(data));
+      const data = await res.json();
+      if (res.ok && data.job_id) {
+        router.push(`/dashboard/jobs/${data.job_id}`);
+      } else {
+        alert("创建失败: " + JSON.stringify(data));
+        setLoading(false);
+      }
+    } catch {
+      alert("创建失败: 网络错误，请检查后端是否可访问");
       setLoading(false);
     }
   }
@@ -272,6 +277,7 @@ export default function NewProjectPage() {
 
             {selectedKit?.reference_image_path && (
               <div className="flex items-center gap-3 p-2 rounded-md border border-border bg-accent/40">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={`${SERVER}/brand-media/${selectedKit.kit_id}/${selectedKit.reference_image_path}`}
                   alt="品牌参考图"

@@ -176,40 +176,50 @@ export default function JobDetailPage() {
   async function handleRetry() {
     setRetrying(true);
     setActionError("");
-    const res = await fetch(`${SERVER}/jobs/${jobId}/retry`, { method: "POST" });
-    setRetrying(false);
-    if (res.ok) {
-      setStatus("queued");
-      // The previous EventSource already closed (the backend ended that
-      // stream once it drained to the earlier terminal event) and nothing
-      // was scheduled to reconnect it, so open a fresh one from where we
-      // left off rather than just flipping a flag nothing reacts to.
-      doneRef.current = false;
-      connectRef.current?.();
-    } else {
-      const body = await res.json().catch(() => ({}));
-      setActionError(body.detail ?? `重试失败 (HTTP ${res.status})`);
+    try {
+      const res = await fetch(`${SERVER}/jobs/${jobId}/retry`, { method: "POST" });
+      if (res.ok) {
+        setStatus("queued");
+        // The previous EventSource already closed (the backend ended that
+        // stream once it drained to the earlier terminal event) and nothing
+        // was scheduled to reconnect it, so open a fresh one from where we
+        // left off rather than just flipping a flag nothing reacts to.
+        doneRef.current = false;
+        connectRef.current?.();
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setActionError(body.detail ?? `重试失败 (HTTP ${res.status})`);
+      }
+    } catch {
+      setActionError("网络错误，请检查后端是否可访问");
+    } finally {
+      setRetrying(false);
     }
   }
 
   async function handleApproval(action: "approve" | "reject") {
     setApproving(true);
     setActionError("");
-    const res = await fetch(`${SERVER}/jobs/${jobId}/approve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, feedback }),
-    });
-    setApproving(false);
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      setActionError(
-        body.detail ?? `操作失败 (HTTP ${res.status}) — 任务状态可能已变化，请刷新页面查看最新状态`
-      );
-      return;
+    try {
+      const res = await fetch(`${SERVER}/jobs/${jobId}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, feedback }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setActionError(
+          body.detail ?? `操作失败 (HTTP ${res.status}) — 任务状态可能已变化，请刷新页面查看最新状态`
+        );
+        return;
+      }
+      setFeedback("");
+      if (action === "approve") setAwaitingStage(null);
+    } catch {
+      setActionError("网络错误，请检查后端是否可访问");
+    } finally {
+      setApproving(false);
     }
-    setFeedback("");
-    if (action === "approve") setAwaitingStage(null);
   }
 
   async function handleSaveEdit() {
@@ -222,18 +232,23 @@ export default function JobDetailPage() {
       return;
     }
     setSaving(true);
-    // Persist edited artifact via the save-artifact endpoint
-    const res = await fetch(`${SERVER}/jobs/${jobId}/artifact`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stage: awaitingStage, content: parsed }),
-    });
-    setSaving(false);
-    if (res.ok) {
-      setPreview(parsed);
-      setEditMode(false);
-    } else {
+    try {
+      // Persist edited artifact via the save-artifact endpoint
+      const res = await fetch(`${SERVER}/jobs/${jobId}/artifact`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stage: awaitingStage, content: parsed }),
+      });
+      if (res.ok) {
+        setPreview(parsed);
+        setEditMode(false);
+      } else {
+        setEditError("保存失败，请重试");
+      }
+    } catch {
       setEditError("保存失败，请重试");
+    } finally {
+      setSaving(false);
     }
   }
 
