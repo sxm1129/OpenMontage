@@ -59,6 +59,12 @@ def test_system_capabilities(client):
     # (which genuinely ARE what's running) implied requests are
     # authenticated when they aren't. Must self-report honestly.
     assert b["auth"]["enforced"] is False
+    # Regression: the wizard and the settings page each hardcoded their own
+    # independent copy of the model catalog, which could silently drift.
+    catalog = r.json()["model_catalog"]
+    assert "leapfast/ltx-2.3" in catalog["video_models"]
+    assert "leapfast/flux2" in catalog["image_models"]
+    assert "qwen3-tts-flash" in catalog["tts_models"]
 
 
 # ── jobs ─────────────────────────────────────────────────────────────────────

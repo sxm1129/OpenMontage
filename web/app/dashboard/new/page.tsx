@@ -12,34 +12,18 @@ import {
   CONTENT_TYPES, isPipelineAvailable, computeMorePipelines, toPipelineOption,
   type PipelineInfo, type PipelineOption,
 } from "@/lib/pipeline-picker";
+import { modelLabel, FALLBACK_MODEL_CATALOG, type ModelCatalog } from "@/lib/model-catalog";
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
-// Hardcoded model option lists — no dynamic capability-fetch endpoint exists
-// yet on the backend, so these mirror exactly what tool_bridge.py /
-// stage_runner.py accept via options.video_model / image_model / tts_model.
-const VIDEO_MODELS = [
-  { id: "leapfast/ltx-2.3", label: "LTX 2.3" },
-  { id: "leapfast/wan2.2", label: "Wan2.2 (无音轨)" },
-  { id: "volcengine/doubao-seedance-2.0", label: "Seedance 2.0" },
-] as const;
-const IMAGE_MODELS = [
-  { id: "leapfast/flux2", label: "Flux2" },
-  { id: "gemini-3.1-flash-image-preview", label: "NanoBanana" },
-] as const;
-const TTS_MODELS = [
-  { id: "qwen3-tts-flash", label: "Qwen3 TTS" },
-  { id: "leapfast/indextts", label: "IndexTTS" },
-] as const;
-
-const DEFAULT_VIDEO_MODEL = VIDEO_MODELS[0].id;
-const DEFAULT_IMAGE_MODEL = IMAGE_MODELS[0].id;
-const DEFAULT_TTS_MODEL = TTS_MODELS[0].id;
+const DEFAULT_VIDEO_MODEL = FALLBACK_MODEL_CATALOG.video_models[0];
+const DEFAULT_IMAGE_MODEL = FALLBACK_MODEL_CATALOG.image_models[0];
+const DEFAULT_TTS_MODEL = FALLBACK_MODEL_CATALOG.tts_models[0];
 
 // Picks a video model different from `exclude`, for the comparison-mode
 // second slot — guarantees the two pickers never default to the same model.
-function otherVideoModel(exclude: string): string {
-  return VIDEO_MODELS.find((m) => m.id !== exclude)?.id ?? VIDEO_MODELS[0].id;
+function otherVideoModel(exclude: string, videoModels: string[]): string {
+  return videoModels.find((id) => id !== exclude) ?? videoModels[0];
 }
 
 type BrandKit = {
@@ -67,9 +51,12 @@ export default function NewProjectPage() {
   });
   const [loading, setLoading] = useState(false);
 
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalog>(FALLBACK_MODEL_CATALOG);
   const [videoModel, setVideoModel] = useState<string>(DEFAULT_VIDEO_MODEL);
   const [compareMode, setCompareMode] = useState(false);
-  const [videoModelB, setVideoModelB] = useState<string>(() => otherVideoModel(DEFAULT_VIDEO_MODEL));
+  const [videoModelB, setVideoModelB] = useState<string>(
+    () => otherVideoModel(DEFAULT_VIDEO_MODEL, FALLBACK_MODEL_CATALOG.video_models)
+  );
   const [imageModel, setImageModel] = useState<string>(DEFAULT_IMAGE_MODEL);
   const [ttsModel, setTtsModel] = useState<string>(DEFAULT_TTS_MODEL);
 
@@ -89,6 +76,13 @@ export default function NewProjectPage() {
     fetch(`${SERVER}/pipelines`)
       .then((r) => r.json())
       .then((d) => setPipelines(d.pipelines ?? []))
+      .catch(() => {});
+    // Live model catalog — falls back to FALLBACK_MODEL_CATALOG (already the
+    // initial state) if this hasn't resolved yet or fails, same pattern as
+    // isPipelineAvailable's "show everything before /pipelines loads".
+    fetch(`${SERVER}/system/capabilities`)
+      .then((r) => r.json())
+      .then((d) => { if (d.model_catalog) setModelCatalog(d.model_catalog); })
       .catch(() => {});
   }, []);
 
@@ -335,23 +329,23 @@ export default function NewProjectPage() {
             <div>
               <label className="text-sm font-medium block mb-1.5">模型</label>
               <div className="flex gap-2 flex-wrap">
-                {VIDEO_MODELS.map((m) => (
+                {modelCatalog.video_models.map((id) => (
                   <button
-                    key={m.id}
+                    key={id}
                     type="button"
                     onClick={() => {
-                      setVideoModel(m.id);
-                      if (compareMode && m.id === videoModelB) {
-                        setVideoModelB(otherVideoModel(m.id));
+                      setVideoModel(id);
+                      if (compareMode && id === videoModelB) {
+                        setVideoModelB(otherVideoModel(id, modelCatalog.video_models));
                       }
                     }}
                     className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
-                      videoModel === m.id
+                      videoModel === id
                         ? "bg-foreground text-background border-foreground"
                         : "border-border hover:border-foreground/40"
                     }`}
                   >
-                    {m.label}
+                    {modelLabel(id)}
                   </button>
                 ))}
               </div>
@@ -365,7 +359,7 @@ export default function NewProjectPage() {
                   const on = e.target.checked;
                   setCompareMode(on);
                   if (on && videoModelB === videoModel) {
-                    setVideoModelB(otherVideoModel(videoModel));
+                    setVideoModelB(otherVideoModel(videoModel, modelCatalog.video_models));
                   }
                 }}
                 className="h-4 w-4 rounded border-border"
@@ -377,23 +371,23 @@ export default function NewProjectPage() {
               <div>
                 <label className="text-sm font-medium block mb-1.5">对比模型 B</label>
                 <div className="flex gap-2 flex-wrap">
-                  {VIDEO_MODELS.map((m) => {
-                    const disabled = m.id === videoModel;
+                  {modelCatalog.video_models.map((id) => {
+                    const disabled = id === videoModel;
                     return (
                       <button
-                        key={m.id}
+                        key={id}
                         type="button"
                         disabled={disabled}
-                        onClick={() => setVideoModelB(m.id)}
+                        onClick={() => setVideoModelB(id)}
                         className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
                           disabled
                             ? "border-border/40 opacity-40 cursor-not-allowed"
-                            : videoModelB === m.id
+                            : videoModelB === id
                               ? "bg-foreground text-background border-foreground"
                               : "border-border hover:border-foreground/40"
                         }`}
                       >
-                        {m.label}
+                        {modelLabel(id)}
                       </button>
                     );
                   })}
@@ -410,18 +404,18 @@ export default function NewProjectPage() {
           <div className="space-y-3">
             <div>
               <div className="flex gap-2 flex-wrap">
-                {IMAGE_MODELS.map((m) => (
+                {modelCatalog.image_models.map((id) => (
                   <button
-                    key={m.id}
+                    key={id}
                     type="button"
-                    onClick={() => setImageModel(m.id)}
+                    onClick={() => setImageModel(id)}
                     className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
-                      imageModel === m.id
+                      imageModel === id
                         ? "bg-foreground text-background border-foreground"
                         : "border-border hover:border-foreground/40"
                     }`}
                   >
-                    {m.label}
+                    {modelLabel(id)}
                   </button>
                 ))}
               </div>
@@ -436,18 +430,18 @@ export default function NewProjectPage() {
           <div className="space-y-3">
             <div>
               <div className="flex gap-2 flex-wrap">
-                {TTS_MODELS.map((m) => (
+                {modelCatalog.tts_models.map((id) => (
                   <button
-                    key={m.id}
+                    key={id}
                     type="button"
-                    onClick={() => setTtsModel(m.id)}
+                    onClick={() => setTtsModel(id)}
                     className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
-                      ttsModel === m.id
+                      ttsModel === id
                         ? "bg-foreground text-background border-foreground"
                         : "border-border hover:border-foreground/40"
                     }`}
                   >
-                    {m.label}
+                    {modelLabel(id)}
                   </button>
                 ))}
               </div>

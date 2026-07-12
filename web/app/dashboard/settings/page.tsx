@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { modelLabel, type ModelCatalog } from "@/lib/model-catalog";
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
@@ -9,6 +10,14 @@ type HealthData = { status: string; service: string };
 type SystemInfo = { serverOk: boolean; jobs: number; brands: number };
 type Seam = { active: string; available: string[]; planned: string[]; enforced?: boolean };
 type Backends = { storage: Seam; queue: Seam; auth: Seam };
+
+// Turns a live model_catalog id list into the same "MaaS · A / B / C" display
+// string this page always showed, without hardcoding the id→label mapping or
+// the id list itself a second time (the wizard is the other consumer).
+function catalogSummary(ids: string[] | undefined, suffix = ""): string {
+  if (!ids || ids.length === 0) return "加载中…";
+  return `MaaS · ${ids.map(modelLabel).join(" / ")}${suffix}`;
+}
 
 const SEAM_LABELS: Record<keyof Backends, { title: string; desc: string }> = {
   queue: { title: "任务队列", desc: "驱动流水线执行的调度层" },
@@ -23,6 +32,10 @@ export default function SettingsPage() {
   // exactly the bug this fixes (MAAS_LLM_MODEL can override the default,
   // and the page should never claim a model isn't the one actually running).
   const [llmModel, setLlmModel] = useState<string | null>(null);
+  // No hardcoded fallback list here either, for the same reason as llmModel —
+  // the wizard and this page used to each hardcode an independent copy of
+  // this catalog, which could silently drift.
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalog | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -43,15 +56,18 @@ export default function SettingsPage() {
       if (caps.status === "fulfilled" && caps.value?.llm_model) {
         setLlmModel(caps.value.llm_model as string);
       }
+      if (caps.status === "fulfilled" && caps.value?.model_catalog) {
+        setModelCatalog(caps.value.model_catalog as ModelCatalog);
+      }
     }
     load();
   }, []);
 
   const env = {
     "LLM 模型": llmModel ?? "加载中…",
-    "视频生成": "MaaS · LTX-2.3 / Wan2.2 / Seedance (CNY 计费)",
-    "图像生成": "MaaS · Flux2 / NanoBanana",
-    "语音合成": "MaaS · qwen3-tts-flash / IndexTTS",
+    "视频生成": catalogSummary(modelCatalog?.video_models, " (CNY 计费)"),
+    "图像生成": catalogSummary(modelCatalog?.image_models),
+    "语音合成": catalogSummary(modelCatalog?.tts_models),
     "成本追踪": "cost_tracker 原账本 (cost_log.json)",
   };
 
