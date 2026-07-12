@@ -7,7 +7,7 @@ const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
 type HealthData = { status: string; service: string };
 type SystemInfo = { serverOk: boolean; jobs: number; brands: number };
-type Seam = { active: string; available: string[]; planned: string[] };
+type Seam = { active: string; available: string[]; planned: string[]; enforced?: boolean };
 type Backends = { storage: Seam; queue: Seam; auth: Seam };
 
 const SEAM_LABELS: Record<keyof Backends, { title: string; desc: string }> = {
@@ -123,15 +123,27 @@ export default function SettingsPage() {
               {(Object.keys(SEAM_LABELS) as (keyof Backends)[]).map((key) => {
                 const seam = backends[key];
                 const meta = SEAM_LABELS[key];
+                // storage/queue are genuinely what's running for every
+                // operation; auth is configured but not enforced by any
+                // route (no Depends() checks it) — showing the same green
+                // "运行中" badge for auth would claim requests are
+                // authenticated when they aren't.
+                const notEnforced = seam.enforced === false;
                 return (
                   <div key={key} className="flex items-start gap-3">
-                    <span className="mt-1 w-2 h-2 rounded-full shrink-0 bg-green-400" />
+                    <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${notEnforced ? "bg-yellow-400" : "bg-green-400"}`} />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-sm font-medium">{meta.title}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded border font-medium bg-green-500/15 text-green-400 border-green-500/30">
-                          运行中: {seam.active}
-                        </span>
+                        {notEnforced ? (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded border font-medium bg-yellow-500/15 text-yellow-500 border-yellow-500/30">
+                            {seam.active} · 未在 API 层强制生效
+                          </span>
+                        ) : (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded border font-medium bg-green-500/15 text-green-400 border-green-500/30">
+                            运行中: {seam.active}
+                          </span>
+                        )}
                         {seam.planned.map((p) => (
                           <span key={p} className="text-[10px] px-1.5 py-0.5 rounded border font-medium bg-muted text-muted-foreground border-border">
                             {p} · 规划中
@@ -139,7 +151,9 @@ export default function SettingsPage() {
                         ))}
                       </div>
                       <p className="text-xs text-muted-foreground mt-0.5">
-                        {meta.desc} — 接口已预留 (server/app/interfaces)，切换实现无需改调用方。
+                        {notEnforced
+                          ? "本地单人工具，未对 API 请求做身份校验——任何能访问这个进程的请求都会被处理。"
+                          : `${meta.desc} — 接口已预留 (server/app/interfaces)，切换实现无需改调用方。`}
                       </p>
                     </div>
                   </div>

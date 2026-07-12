@@ -54,6 +54,11 @@ def test_system_capabilities(client):
     assert b["queue"]["active"] == "asyncio"
     assert b["storage"]["active"] == "local"
     assert b["auth"]["active"] == "passphrase"
+    # Confirmed live (deep quality review): no route actually calls
+    # AuthProvider.verify() — reporting auth the same way as storage/queue
+    # (which genuinely ARE what's running) implied requests are
+    # authenticated when they aren't. Must self-report honestly.
+    assert b["auth"]["enforced"] is False
 
 
 # ── jobs ─────────────────────────────────────────────────────────────────────
@@ -110,6 +115,24 @@ def test_save_artifact_writes_file(client, tmp_path):
     written = tmp_path / "projects" / "p1" / "artifacts" / "script.json"
     assert written.exists()
     assert client.post("/jobs/nope/artifact", json={"stage": "s", "content": {}}).status_code == 404
+
+
+# ── security: path traversal via project_name / stage ────────────────────────
+
+def test_create_job_rejects_traversal_project_name(client):
+    # Confirmed live (deep quality review): project_name="../../outside_target"
+    # let POST /jobs/{id}/artifact write a real file outside the projects/
+    # tree. Reject at creation time so the unsafe value never enters the
+    # store at all.
+    r = client.post("/jobs", json=_new_job_body(project_name="../../outside_target"))
+    assert r.status_code == 422
+
+
+def test_save_artifact_rejects_traversal_stage_name(client, tmp_path):
+    jid = client.post("/jobs", json=_new_job_body(project_name="p2")).json()["job_id"]
+    r = client.post(f"/jobs/{jid}/artifact", json={"stage": "../../escaped", "content": {}})
+    assert r.status_code == 422
+    assert not (tmp_path.parent / "escaped.json").exists()
 
 
 # ── brands CRUD ──────────────────────────────────────────────────────────────

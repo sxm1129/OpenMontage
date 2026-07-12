@@ -12,6 +12,7 @@ both the OpenAI SDK (pointing at MaaS) and Anthropic SDK.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -20,6 +21,27 @@ from typing import Any
 # Add OpenMontage root to path so we can import tools/lib
 OM_ROOT = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(OM_ROOT))
+
+# Artifact names are meant to be flat identifiers (e.g. "research_brief"), not
+# paths — reject anything else outright rather than trying to reason about
+# path-containment edge cases for a field that should never contain a
+# separator at all.
+_SAFE_ARTIFACT_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _safe_relative_path(base: Path, relative: str) -> Path | None:
+    """Resolve `relative` under `base`, returning it only if it actually stays
+    within `base`. Guards against pathlib's absolute-path-override footgun
+    (`base / "/etc/passwd"` silently discards `base`) and `..` traversal —
+    confirmed live: read_file(path=".env") alone discloses MAAS_API_KEY since
+    OM_ROOT is the repo root, and read_file(path="/etc/passwd") escapes
+    entirely with no code anywhere stopping it. Returns None on any escape."""
+    try:
+        candidate = (base / relative).resolve()
+        candidate.relative_to(base.resolve())
+    except (ValueError, OSError):
+        return None
+    return candidate
 
 # Authoritative budget-exceeded type shared with the runner (fall back to a
 # local class if the cost_tracker module isn't importable).
@@ -220,7 +242,16 @@ def execute_tool(
     """Execute a tool call and return a string result for the agent."""
 
     if name == "read_file":
-        path = OM_ROOT / args["path"]
+        path = _safe_relative_path(OM_ROOT, args["path"])
+        if path is None:
+            return f"ERROR: path {args['path']!r} is outside the OpenMontage root — not allowed"
+        # read_file exists for skills/, pipeline_defs/, schemas/, and project
+        # artifacts (per its own tool description) — never dotfiles. Without
+        # this, staying within OM_ROOT isn't enough: .env sits directly at
+        # OM_ROOT, so a plain in-bounds read_file(path=".env") would still
+        # disclose MAAS_API_KEY.
+        if any(part.startswith(".") for part in path.relative_to(OM_ROOT.resolve()).parts):
+            return f"ERROR: refusing to read a dotfile/dotdir path: {args['path']!r}"
         if not path.exists():
             return f"ERROR: File not found: {args['path']}"
         content = path.read_text(encoding="utf-8")
@@ -235,6 +266,11 @@ def execute_tool(
             return "ERROR: write_artifact requires 'artifact_name' parameter"
         if content is None:
             return "ERROR: write_artifact requires 'content' parameter"
+        if not _SAFE_ARTIFACT_NAME.match(artifact_name):
+            return (
+                f"ERROR: invalid artifact_name {artifact_name!r} — must contain only "
+                "letters, numbers, underscores, and hyphens (no path separators or '..')"
+            )
         artifacts_dir = project_dir / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         out = artifacts_dir / f"{artifact_name}.json"

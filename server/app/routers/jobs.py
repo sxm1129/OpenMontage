@@ -2,12 +2,13 @@
 
 import asyncio
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.store import job_store
 from app.runner.stage_runner import run_pipeline_job
@@ -17,6 +18,24 @@ OM_ROOT = Path(__file__).parent.parent.parent.parent
 
 router = APIRouter()
 
+# Stage names are always simple ASCII identifiers (CINEMATIC_STAGES / every
+# pipeline_defs/*.yaml stage `name:`) — never containing a path separator.
+_SAFE_STAGE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _reject_path_traversal(v: str, field: str) -> str:
+    # project_name is a free-text, human-entered field (real project names in
+    # this codebase are often CJK, e.g. "小兔子电视") so it can't be locked to
+    # an ASCII identifier pattern the way artifact/stage names can — but it's
+    # still joined unsanitized into a filesystem path in multiple places
+    # (this file's save_artifact, and stage_runner.py's project_dir), so "/"
+    # and ".." must be blocked outright. Confirmed live: project_name=
+    # "../../outside_target" let POST /jobs/{id}/artifact write a real file
+    # entirely outside the projects/ tree.
+    if "/" in v or "\\" in v or ".." in v:
+        raise ValueError(f"{field} must not contain '/', '\\\\', or '..'")
+    return v
+
 
 class CreateJobRequest(BaseModel):
     project_name: str
@@ -24,6 +43,11 @@ class CreateJobRequest(BaseModel):
     pipeline: str              # e.g. "cinematic"
     brand_info: dict[str, Any]
     options: dict[str, Any] = {}
+
+    @field_validator("project_name")
+    @classmethod
+    def _validate_project_name(cls, v: str) -> str:
+        return _reject_path_traversal(v, "project_name")
 
 
 class ApproveStageRequest(BaseModel):
@@ -34,6 +58,15 @@ class ApproveStageRequest(BaseModel):
 class SaveArtifactRequest(BaseModel):
     stage: str
     content: dict[str, Any]
+
+    @field_validator("stage")
+    @classmethod
+    def _validate_stage(cls, v: str) -> str:
+        if not _SAFE_STAGE_NAME.match(v):
+            raise ValueError(
+                "stage must contain only letters, numbers, underscores, and hyphens"
+            )
+        return v
 
 
 @router.post("", status_code=201)

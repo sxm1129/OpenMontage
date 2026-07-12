@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -55,6 +56,57 @@ def test_write_artifact_and_missing_params(tmp_path):
 
     assert "requires 'artifact_name'" in execute_tool("write_artifact", {"content": {}}, tmp_path)
     assert "requires 'content'" in execute_tool("write_artifact", {"artifact_name": "x"}, tmp_path)
+
+
+# ── security: path containment for read_file / write_artifact ───────────────
+
+def test_read_file_blocks_absolute_path_escape():
+    # Confirmed live (deep quality review): OM_ROOT / "/etc/passwd" silently
+    # discards OM_ROOT (pathlib's absolute-path-override behavior) and reads
+    # a real system file with zero containment check.
+    out = execute_tool("read_file", {"path": "/etc/passwd"}, Path("/tmp"))
+    assert out.startswith("ERROR:")
+    assert "outside the OpenMontage root" in out
+
+
+def test_read_file_blocks_traversal_escape(tmp_path):
+    out = execute_tool("read_file", {"path": "../../../../../../../../etc/passwd"}, tmp_path)
+    assert out.startswith("ERROR:")
+    assert "outside the OpenMontage root" in out
+
+
+def test_read_file_blocks_env_dotfile():
+    # Even a plain in-bounds relative read discloses MAAS_API_KEY, since .env
+    # sits directly at OM_ROOT — containment alone isn't enough.
+    out = execute_tool("read_file", {"path": ".env"}, Path("/tmp"))
+    assert out.startswith("ERROR:")
+    assert "dotfile" in out.lower()
+
+
+def test_write_artifact_rejects_absolute_path_name(tmp_path):
+    out = execute_tool(
+        "write_artifact", {"artifact_name": "/etc/cron.d/x", "content": {}}, tmp_path,
+    )
+    assert out.startswith("ERROR:")
+    assert "invalid artifact_name" in out
+    assert not Path("/etc/cron.d/x.json").exists()
+
+
+def test_write_artifact_rejects_traversal_name(tmp_path):
+    out = execute_tool(
+        "write_artifact", {"artifact_name": "../../escaped", "content": {}}, tmp_path,
+    )
+    assert out.startswith("ERROR:")
+    assert "invalid artifact_name" in out
+    assert not (tmp_path.parent.parent / "escaped.json").exists()
+
+
+def test_write_artifact_rejects_embedded_slash(tmp_path):
+    out = execute_tool(
+        "write_artifact", {"artifact_name": "sub/dir", "content": {}}, tmp_path,
+    )
+    assert out.startswith("ERROR:")
+    assert "invalid artifact_name" in out
 
 
 def test_unknown_tool(tmp_path):
