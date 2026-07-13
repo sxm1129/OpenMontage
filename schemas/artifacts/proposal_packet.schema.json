@@ -18,7 +18,7 @@
           "hook": { "type": "string", "description": "Opening line that creates curiosity. Under 20 words." },
           "narrative_structure": {
             "type": "string",
-            "enum": ["analogy", "problem_solution", "journey", "debate", "myth_busting", "timeline", "comparison", "tutorial", "story", "data_narrative"],
+            "enum": ["analogy", "problem_solution", "journey", "debate", "myth_busting", "timeline", "comparison", "tutorial", "story", "data_narrative", "mystery"],
             "description": "The structural approach to telling this story"
           },
           "visual_approach": { "type": "string", "description": "Primary visual strategy — specific enough to guide scene planning" },
@@ -45,10 +45,10 @@
           },
           "why_this_works": { "type": "string", "description": "Rationale citing research findings — not vibes" }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       },
       "minItems": 3,
-      "description": "At least 3 genuinely different concept directions"
+      "description": "At least 3 genuinely different concept directions. additionalProperties intentionally open — real runs routinely attach extra creative-direction fields (camera_language, color_palette, delivery_promise, emotional_arc, lighting, renderer_family, texture, typography, arc_description) that are legitimate detail, not typos."
     },
     "selected_concept": {
       "type": "object",
@@ -121,12 +121,12 @@
             "properties": {
               "description": { "type": "string" },
               "total_cost_usd": { "type": "number", "minimum": 0 },
-              "quality_level": { "type": "string", "enum": ["premium", "standard", "budget", "free"] },
+              "quality_level": { "type": "string", "enum": ["premium", "standard", "budget", "free", "draft", "presentable", "broadcast"] },
               "what_changes": { "type": "string" }
             },
             "additionalProperties": false
           },
-          "description": "Alternative production paths at different price/quality points"
+          "description": "Alternative production paths at different price/quality points. quality_level accepts both the price-tier vocabulary (premium/standard/budget/free) and the quality_floor vocabulary (draft/presentable/broadcast) — real runs use the latter here just as often, describing alternative paths in terms of the same quality floor tiers used in delivery_promise."
         },
         "delivery_promise": {
           "type": "object",
@@ -153,7 +153,7 @@
         "render_runtime": {
           "type": "string",
           "enum": ["remotion", "hyperframes", "ffmpeg"],
-          "description": "Locked at proposal stage — the technical runtime that realizes renderer_family. remotion=React scene components, hyperframes=HTML/CSS/GSAP, ffmpeg=simple concat/trim. Must be explicit and auditable; silent swaps are forbidden."
+          "description": "Locked at proposal stage — the technical runtime that realizes renderer_family. remotion=React scene components, hyperframes=HTML/CSS/GSAP, ffmpeg=simple concat/trim. Must be explicit and auditable; silent swaps are forbidden. Deliberately left a closed enum: real artifacts have been observed shipping placeholder values like 'PENDING_USER_APPROVAL' here, which is exactly the unlocked/ambiguous state this field exists to prevent — see STEP 1 measurement notes."
         },
         "composition_mode": {
           "type": "string",
@@ -169,8 +169,8 @@
           "type": "object",
           "description": "Resolved music plan from the proposal stage",
           "properties": {
-            "source_type": { "type": "string", "enum": ["user_library", "ai_generated", "bring_your_own", "none"] },
-            "track_path": { "type": "string", "description": "Path to selected track, if known" },
+            "source_type": { "type": "string", "enum": ["user_library", "ai_generated", "bring_your_own", "none", "music_library_search"], "description": "music_library_search = searched a stock/licensed music library service (distinct from user_library, which is the user's own local files)." },
+            "track_path": { "type": ["string", "null"], "description": "Path to selected track, if known. null when no specific track has been chosen yet." },
             "provider": { "type": "string", "description": "Music generation provider, if AI-generated" },
             "mood_direction": { "type": "string", "description": "Music mood description from research" },
             "estimated_cost_usd": { "type": "number", "minimum": 0 }
@@ -280,14 +280,13 @@
     },
     "cost_estimate": {
       "type": "object",
-      "required": ["total_estimated_usd", "line_items", "budget_verdict"],
+      "description": "A real cost estimate before spending money. required is intentionally minimal: real runs name the total and the budget comparison inconsistently (total_estimated_usd/total_usd/total_cost_usd/total_estimated_cost_usd, budget_verdict/budget_status/within_budget), and often add a CNY figure alongside the USD one. The presence of estimate data under any of these names is what matters, not the exact key — additionalProperties stays open for that reason. total_estimated_usd/line_items/budget_verdict remain the canonical names new agent runs should prefer.",
       "properties": {
         "total_estimated_usd": { "type": "number", "minimum": 0 },
         "line_items": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["tool", "operation", "estimated_usd"],
             "properties": {
               "tool": { "type": "string" },
               "operation": { "type": "string", "description": "What this tool call does" },
@@ -295,8 +294,9 @@
               "estimated_usd": { "type": "number", "minimum": 0 },
               "notes": { "type": "string" }
             },
-            "additionalProperties": false
-          }
+            "additionalProperties": true
+          },
+          "description": "additionalProperties intentionally open — real runs commonly use item/cost_usd/cost_cny instead of tool/operation/estimated_usd."
         },
         "budget_cap_usd": {
           "type": "number",
@@ -314,7 +314,7 @@
           "description": "Concrete ways to reduce cost if over budget"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": true
     },
     "approval": {
       "type": "object",
@@ -328,13 +328,14 @@
         "user_notes": { "type": "string", "description": "Any feedback or changes requested" },
         "approved_budget_usd": { "type": "number", "minimum": 0, "description": "Budget the user explicitly approved" }
       },
-      "additionalProperties": false
+      "additionalProperties": true
     },
     "metadata": { "type": "object" }
   },
   "$defs": {
     "taste_profile": {
       "type": "object",
+      "description": "Deliberately left strict (closed additionalProperties, all 4 numeric fields required): this is the quantified taste-governance calibration (see tests/contracts/test_taste_governance_contracts.py). A real artifact observed substituting descriptive-only art-direction fields (camera_language, color_palette_description, lighting_approach, texture, typography_if_used) with none of the required numeric scores looks like the governance step being skipped, not an overly strict schema — see STEP 1 measurement notes.",
       "required": ["design_read", "visual_variance", "motion_intensity", "information_density"],
       "properties": {
         "design_read": {
@@ -374,5 +375,5 @@
       "additionalProperties": false
     }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

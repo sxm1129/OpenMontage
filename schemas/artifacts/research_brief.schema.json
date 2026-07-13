@@ -99,6 +99,7 @@
     },
     "data_points": {
       "type": "array",
+      "description": "Verified facts and statistics. source_url deliberately kept required: it is the anti-fabrication check that a claim traces back to a real, checkable source. A real artifact observed asserting a claim with only a generic source_name (no URL at all) looks like an unverifiable claim, not an overly strict schema — see STEP 1 measurement notes.",
       "items": {
         "type": "object",
         "required": ["claim", "source_url", "credibility"],
@@ -123,8 +124,7 @@
         },
         "additionalProperties": false
       },
-      "minItems": 3,
-      "description": "Verified facts and statistics — at least 3, aim for 5-8"
+      "minItems": 3
     },
     "audience_insights": {
       "type": "object",
@@ -188,7 +188,7 @@
           "hook": { "type": "string", "description": "One-sentence attention grabber" },
           "type": {
             "type": "string",
-            "enum": ["trending", "evergreen", "contrarian", "narrative", "data_driven"],
+            "enum": ["trending", "evergreen", "contrarian", "narrative", "data_driven", "mood_piece"],
             "description": "What kind of angle is this?"
           },
           "why_now": { "type": "string", "description": "Why this angle is compelling right now — cite research findings" },
@@ -198,10 +198,10 @@
             "description": "Which data_points or audience_insights support this angle?"
           }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       },
       "minItems": 3,
-      "description": "Angle candidates discovered through research — raw material for the Proposal Director"
+      "description": "Angle candidates discovered through research — raw material for the Proposal Director. additionalProperties intentionally open — real runs routinely attach extra creative-direction fields (audio_direction, motion_commitment, visual_direction, camera_approach, color_palette, editing_rhythm, risk, cinematic_references) that are legitimate detail, not typos."
     },
     "visual_references": {
       "type": "array",
@@ -220,7 +220,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["url", "title", "used_for"],
+        "required": ["url", "title"],
         "properties": {
           "url": { "type": "string", "format": "uri" },
           "title": { "type": "string" },
@@ -230,10 +230,10 @@
             "enum": ["primary", "secondary", "anecdotal"]
           }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       },
       "minItems": 5,
-      "description": "All sources used — at least 5. Full bibliography."
+      "description": "All sources used — at least 5. Full bibliography. used_for demoted from required and additionalProperties opened: real runs commonly describe a source's role via 'relevance'/'accessed_date' instead of 'used_for'. url+title (the actual verifiable citation) stay required."
     },
     "research_summary": {
       "type": "string",

@@ -4,7 +4,7 @@
   "title": "Decision Log",
   "description": "Audit trail of every meaningful choice made during production. Prevents hidden system behavior, enables reviewer inspection, and guards against context drift.",
   "type": "object",
-  "required": ["version", "project_id", "decisions"],
+  "required": ["version", "decisions"],
   "properties": {
     "version": { "type": "string", "const": "1.0" },
     "project_id": { "type": "string" },
@@ -12,11 +12,11 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["decision_id", "stage", "category", "subject", "options_considered", "selected", "reason"],
+        "required": ["category", "subject"],
         "properties": {
           "decision_id": {
             "type": "string",
-            "description": "Unique ID, e.g., d-001, d-002"
+            "description": "Unique ID, e.g., d-001, d-002. Real runs also commonly use a bare 'id' field for this — kept as an additional property (see additionalProperties below) rather than forced to this exact name."
           },
           "stage": {
             "type": "string",
@@ -24,25 +24,7 @@
           },
           "category": {
             "type": "string",
-            "enum": [
-              "pipeline_selection",
-              "provider_selection",
-              "renderer_family_selection",
-              "render_runtime_selection",
-              "composition_mode",
-              "playbook_selection",
-              "fallback_decision",
-              "budget_tradeoff",
-              "downgrade_approval",
-              "music_source",
-              "motion_commitment",
-              "concept_selection",
-              "voice_selection",
-              "capability_extension",
-              "playbook_override",
-              "visual_accuracy_check"
-            ],
-            "description": "What class of decision this is"
+            "description": "What class of decision this is, e.g. pipeline_selection, provider_selection, renderer_family_selection, render_runtime_selection, composition_mode, playbook_selection, fallback_decision, budget_tradeoff, downgrade_approval, music_source, motion_commitment, concept_selection, voice_selection, capability_extension, playbook_override, visual_accuracy_check. Not a closed enum: real agent runs routinely coin new, equally legitimate categories (e.g. capability_constraint, creative_direction, source_mode) as new kinds of decisions arise."
           },
           "subject": {
             "type": "string",
@@ -51,32 +33,36 @@
           "options_considered": {
             "type": "array",
             "items": {
-              "type": "object",
-              "required": ["option_id", "label", "score", "reason"],
-              "properties": {
-                "option_id": { "type": "string" },
-                "label": { "type": "string", "description": "Human-readable name" },
-                "score": {
-                  "type": "number",
-                  "minimum": 0,
-                  "maximum": 1,
-                  "description": "Normalized score 0-1 (1 is best)"
-                },
-                "reason": { "type": "string", "description": "Why this option scored this way" },
-                "rejected_because": { "type": "string", "description": "If rejected, why" }
-              },
-              "additionalProperties": false
+              "oneOf": [
+                { "type": "string", "description": "Shorthand: just the option's label/id when no per-option scoring was done." },
+                {
+                  "type": "object",
+                  "properties": {
+                    "option_id": { "type": "string" },
+                    "label": { "type": "string", "description": "Human-readable name" },
+                    "score": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1,
+                      "description": "Normalized score 0-1 (1 is best)"
+                    },
+                    "reason": { "type": "string", "description": "Why this option scored this way" },
+                    "rejected_because": { "type": "string", "description": "If rejected, why" }
+                  },
+                  "additionalProperties": true
+                }
+              ]
             },
             "minItems": 1,
-            "description": "All options evaluated (including rejected ones)"
+            "description": "All options evaluated (including rejected ones). Real runs range from a bare list of option labels to fully-scored option objects — both are accepted."
           },
           "selected": {
             "type": "string",
-            "description": "option_id of the selected option"
+            "description": "option_id of the selected option. Real runs commonly use 'recommendation' instead — kept as an additional property rather than forced to this exact name."
           },
           "reason": {
             "type": "string",
-            "description": "Why this option was selected over alternatives"
+            "description": "Why this option was selected over alternatives. Real runs commonly use 'recommendation_rationale', 'rationale', or 'notes' instead — kept as additional properties rather than forced to this exact name."
           },
           "user_visible": {
             "type": "boolean",
@@ -95,9 +81,9 @@
             "description": "Agent's confidence in this decision (0 = uncertain, 1 = certain)"
           }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       }
     }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

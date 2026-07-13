@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "openmontage/artifacts/edit_decisions",
   "title": "Edit Decisions",
-  "description": "Editorial decisions produced by the Edit Agent.",
+  "description": "Editorial decisions produced by the Edit Agent. Top-level additionalProperties is intentionally open: real edit runs routinely attach extra editorial-rationale fields (e.g. beat_timing, editorial_intent, quality_gate, reframe_notes, title_card_windows) that are legitimate context, not typos, so they should not be rejected. cuts[], overlays[], and subtitles also opened for the same reason — real runs add fields like cuts[].type (media type: video/image) and a rationale 'reason' on overlays/subtitles. audio and bespoke stay closed: no real-artifact evidence of legitimate extra fields there, and both feed a structural render contract downstream.",
   "type": "object",
   "required": ["version", "cuts", "render_runtime"],
   "properties": {
@@ -59,7 +59,7 @@
           },
           "reason": { "type": "string" }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       }
     },
     "overlays": {
@@ -84,7 +84,7 @@
           "animation": { "type": "string" },
           "opacity": { "type": "number", "minimum": 0, "maximum": 1 }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       }
     },
     "audio": {
@@ -163,7 +163,7 @@
         "position": { "type": "string", "enum": ["top-center", "bottom-center", "center"] },
         "max_words_per_line": { "type": "integer", "minimum": 1 }
       },
-      "additionalProperties": false
+      "additionalProperties": true
     },
     "music": {
       "type": "object",
@@ -229,5 +229,5 @@
     },
     "metadata": { "type": "object" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

@@ -1196,6 +1196,12 @@ def test_final_review_tracks_runtime_and_swap():
 
 
 def test_decision_log_has_render_runtime_category():
+    # `category` was loosened from a closed enum to a free-form string (real
+    # agent runs routinely coin new, equally legitimate category names) — the
+    # documented examples in its description are the only remaining place
+    # "render_runtime_selection" is recognized, and stage_runner.py's
+    # _check_render_runtime_consistency() relies on that exact string as the
+    # category a divergence-justifying decision_log entry must use.
     schema_path = (
         Path(__file__).resolve().parent.parent.parent
         / "schemas"
@@ -1203,10 +1209,8 @@ def test_decision_log_has_render_runtime_category():
         / "decision_log.schema.json"
     )
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    category_enum = schema["properties"]["decisions"]["items"]["properties"][
-        "category"
-    ]["enum"]
-    assert "render_runtime_selection" in category_enum
+    category_field = schema["properties"]["decisions"]["items"]["properties"]["category"]
+    assert "render_runtime_selection" in category_field.get("description", "")
 
 
 # ------------------------------------------------------------------

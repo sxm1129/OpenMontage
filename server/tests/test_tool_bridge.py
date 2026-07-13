@@ -640,3 +640,80 @@ def test_budget_exceeded_error_carries_structured_fields(tmp_path, monkeypatch):
     # str(exc) must keep working for any existing caller that only cares
     # about the message text.
     assert "over budget" in str(exc)
+
+
+# ── write_artifact: warn-only schema validation ──────────────────────────────
+
+def test_write_artifact_warns_on_schema_mismatch_but_still_writes(tmp_path, monkeypatch):
+    # "brief" has a real schema (schemas/artifacts/brief.schema.json) requiring
+    # title/hook/key_points/etc. A deliberately malformed call must still
+    # write the file (warn-only — this must never reject the write) but
+    # surface the mismatch both in the return string and as an event.
+    from app.runner import tool_bridge
+    monkeypatch.setattr(tool_bridge, "OM_ROOT", tmp_path)  # so out.relative_to(OM_ROOT) resolves
+    events = []
+    out = execute_tool(
+        "write_artifact",
+        {"artifact_name": "brief", "content": {"version": "1.0"}},
+        tmp_path,
+        emit_event=events.append,
+    )
+
+    # The "Written to {path}" prefix contract must survive — existing callers
+    # substring-match on it.
+    assert out.startswith("Written to")
+    assert "schema warning" in out
+
+    written = json.loads((tmp_path / "artifacts" / "brief.json").read_text())
+    assert written == {"version": "1.0"}
+
+    warnings = [e for e in events if e["type"] == "warning"]
+    assert len(warnings) == 1
+    assert "brief" in warnings[0]["message"]
+
+    # artifact_written must still fire — the warning is additive, not a
+    # replacement for the normal success event.
+    assert any(e["type"] == "artifact_written" for e in events)
+
+
+def test_write_artifact_no_warning_when_schema_valid(tmp_path, monkeypatch):
+    from app.runner import tool_bridge
+    monkeypatch.setattr(tool_bridge, "OM_ROOT", tmp_path)
+    valid_brief = {
+        "version": "1.0",
+        "title": "Test Brief",
+        "hook": "Did you know?",
+        "key_points": ["point 1"],
+        "tone": "casual",
+        "style": "clean-professional",
+        "target_platform": "youtube",
+        "target_duration_seconds": 60,
+    }
+    events = []
+    out = execute_tool(
+        "write_artifact",
+        {"artifact_name": "brief", "content": valid_brief},
+        tmp_path,
+        emit_event=events.append,
+    )
+
+    assert out == f"Written to {tmp_path / 'artifacts' / 'brief.json'}"
+    assert "schema warning" not in out
+    assert not [e for e in events if e["type"] == "warning"]
+
+
+def test_write_artifact_no_schema_for_artifact_name_is_not_a_warning(tmp_path, monkeypatch):
+    # "research" (unlike "research_brief") has no schema file at all — schema
+    # lookup failing must be treated as "nothing to validate", not surfaced
+    # as a warning.
+    from app.runner import tool_bridge
+    monkeypatch.setattr(tool_bridge, "OM_ROOT", tmp_path)
+    events = []
+    out = execute_tool(
+        "write_artifact",
+        {"artifact_name": "research", "content": {"a": 1}},
+        tmp_path,
+        emit_event=events.append,
+    )
+    assert out == f"Written to {tmp_path / 'artifacts' / 'research.json'}"
+    assert not [e for e in events if e["type"] == "warning"]

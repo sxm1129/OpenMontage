@@ -82,7 +82,7 @@
                   "items": { "type": "string" },
                   "minItems": 1
                 },
-                "dialogue": { "type": "string" },
+                "dialogue": { "type": ["string", "null"], "description": "null when this character has no line in this scene (e.g. a silent acting beat)." },
                 "target": { "type": "string" },
                 "notes": { "type": "string" }
               },
@@ -107,9 +107,10 @@
             }
           }
         },
-        "additionalProperties": false
+        "additionalProperties": true
       },
-      "minItems": 1
+      "minItems": 1,
+      "description": "additionalProperties intentionally open on each scene — real runs attach an extended structured cinematography breakdown under a '5_aspect_spec'/'five_aspects' key (subject, subject_motion, scene, etc.) that isn't in this schema yet but is legitimate detail, not a typo."
     },
     "metadata": { "type": "object" }
   },

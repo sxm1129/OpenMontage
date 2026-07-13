@@ -383,12 +383,46 @@ def execute_tool(
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         out = artifacts_dir / f"{artifact_name}.json"
         out.write_text(json.dumps(content, ensure_ascii=False, indent=2))
+
+        # Warn-only schema check — never blocks the write. The artifact is
+        # already on disk by this point; a malformed artifact is still more
+        # useful to the pipeline than no artifact at all, and a hard rejection
+        # here would turn a schema gap into a stage failure the agent can't
+        # recover from. This exists so a malformed write shows up as a visible
+        # warning right here instead of its first sign of trouble being a
+        # downstream KeyError/mystery several stages later.
+        schema_warning: str | None = None
+        try:
+            from schemas.artifacts import validate_artifact
+            validate_artifact(artifact_name, content)
+        except FileNotFoundError:
+            # No schema registered for this artifact_name (list_schemas()
+            # only covers the canonical ~20 artifact types) — nothing to
+            # validate against, not a validation failure.
+            pass
+        except Exception as e:
+            # Covers jsonschema.ValidationError (the expected case) and any
+            # other unexpected error surfaced while validating — all treated
+            # the same way: surface it, don't let it interrupt the write.
+            schema_warning = getattr(e, "message", None) or str(e)
+            if len(schema_warning) > 300:
+                schema_warning = schema_warning[:300] + "…"
+
         if emit_event:
             emit_event({
                 "type": "artifact_written",
                 "artifact": artifact_name,
                 "path": str(out.relative_to(OM_ROOT)),
             })
+            if schema_warning:
+                emit_event({
+                    "type": "warning",
+                    "path": str(out.relative_to(OM_ROOT)),
+                    "message": f"{artifact_name} written but failed schema validation: {schema_warning}",
+                })
+
+        if schema_warning:
+            return f"Written to {out} (schema warning: {schema_warning})"
         return f"Written to {out}"
 
     elif name == "run_openmontage_tool":
