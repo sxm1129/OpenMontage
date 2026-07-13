@@ -15,6 +15,7 @@ import {
 } from "@/lib/pipeline-picker";
 import { modelLabel, FALLBACK_MODEL_CATALOG, type ModelCatalog } from "@/lib/model-catalog";
 import { SERVER, apiRequest } from "@/lib/api";
+import { PillSelect } from "@/components/pill-select";
 
 const DEFAULT_VIDEO_MODEL = FALLBACK_MODEL_CATALOG.video_models[0];
 const DEFAULT_IMAGE_MODEL = FALLBACK_MODEL_CATALOG.image_models[0];
@@ -352,27 +353,17 @@ export default function NewProjectPage() {
           <div className="space-y-3">
             <div>
               <label className="text-sm font-medium block mb-1.5">模型</label>
-              <div className="flex gap-2 flex-wrap">
-                {modelCatalog.video_models.map((id) => (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => {
-                      setVideoModel(id);
-                      if (compareMode && id === videoModelB) {
-                        setVideoModelB(otherVideoModel(id, modelCatalog.video_models));
-                      }
-                    }}
-                    className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
-                      videoModel === id
-                        ? "bg-foreground text-background border-foreground"
-                        : "border-border hover:border-foreground/40"
-                    }`}
-                  >
-                    {modelLabel(id)}
-                  </button>
-                ))}
-              </div>
+              <PillSelect
+                options={modelCatalog.video_models}
+                value={videoModel}
+                onChange={(id) => {
+                  setVideoModel(id);
+                  if (compareMode && id === videoModelB) {
+                    setVideoModelB(otherVideoModel(id, modelCatalog.video_models));
+                  }
+                }}
+                renderLabel={modelLabel}
+              />
             </div>
 
             <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
@@ -394,28 +385,13 @@ export default function NewProjectPage() {
             {compareMode && (
               <div>
                 <label className="text-sm font-medium block mb-1.5">对比模型 B</label>
-                <div className="flex gap-2 flex-wrap">
-                  {modelCatalog.video_models.map((id) => {
-                    const disabled = id === videoModel;
-                    return (
-                      <button
-                        key={id}
-                        type="button"
-                        disabled={disabled}
-                        onClick={() => setVideoModelB(id)}
-                        className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
-                          disabled
-                            ? "border-border/40 opacity-40 cursor-not-allowed"
-                            : videoModelB === id
-                              ? "bg-foreground text-background border-foreground"
-                              : "border-border hover:border-foreground/40"
-                        }`}
-                      >
-                        {modelLabel(id)}
-                      </button>
-                    );
-                  })}
-                </div>
+                <PillSelect
+                  options={modelCatalog.video_models}
+                  value={videoModelB}
+                  onChange={setVideoModelB}
+                  disabledIds={[videoModel]}
+                  renderLabel={modelLabel}
+                />
               </div>
             )}
           </div>
@@ -427,22 +403,12 @@ export default function NewProjectPage() {
           <h2 className="text-sm font-semibold text-foreground/70 uppercase tracking-wider">图像模型</h2>
           <div className="space-y-3">
             <div>
-              <div className="flex gap-2 flex-wrap">
-                {modelCatalog.image_models.map((id) => (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setImageModel(id)}
-                    className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
-                      imageModel === id
-                        ? "bg-foreground text-background border-foreground"
-                        : "border-border hover:border-foreground/40"
-                    }`}
-                  >
-                    {modelLabel(id)}
-                  </button>
-                ))}
-              </div>
+              <PillSelect
+                options={modelCatalog.image_models}
+                value={imageModel}
+                onChange={setImageModel}
+                renderLabel={modelLabel}
+              />
             </div>
           </div>
         </div>
@@ -453,22 +419,12 @@ export default function NewProjectPage() {
           <h2 className="text-sm font-semibold text-foreground/70 uppercase tracking-wider">语音模型</h2>
           <div className="space-y-3">
             <div>
-              <div className="flex gap-2 flex-wrap">
-                {modelCatalog.tts_models.map((id) => (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setTtsModel(id)}
-                    className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
-                      ttsModel === id
-                        ? "bg-foreground text-background border-foreground"
-                        : "border-border hover:border-foreground/40"
-                    }`}
-                  >
-                    {modelLabel(id)}
-                  </button>
-                ))}
-              </div>
+              <PillSelect
+                options={modelCatalog.tts_models}
+                value={ttsModel}
+                onChange={setTtsModel}
+                renderLabel={modelLabel}
+              />
             </div>
 
             {ttsModel === "leapfast/indextts" && (
@@ -540,22 +496,12 @@ export default function NewProjectPage() {
           <div className="space-y-3">
             <div>
               <label className="text-sm font-medium block mb-1.5">时长</label>
-              <div className="flex gap-2">
-                {["15", "30", "60"].map((d) => (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => setForm(f => ({ ...f, duration: d }))}
-                    className={`px-4 py-1.5 rounded-md text-sm border transition-colors ${
-                      form.duration === d
-                        ? "bg-foreground text-background border-foreground"
-                        : "border-border hover:border-foreground/40"
-                    }`}
-                  >
-                    {d}s
-                  </button>
-                ))}
-              </div>
+              <PillSelect
+                options={["15", "30", "60"]}
+                value={form.duration}
+                onChange={(d) => setForm(f => ({ ...f, duration: d }))}
+                renderLabel={(d) => `${d}s`}
+              />
             </div>
             <div>
               <label className="text-sm font-medium block mb-1.5">预算上限 ¥（选填）</label>
