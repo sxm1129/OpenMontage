@@ -84,7 +84,11 @@ CINEMATIC_STAGES = [
     # planning stage.
     {"name": "assets",      "skill": "skills/pipelines/cinematic/asset-director.md",      "approval": True,  "produces": ["asset_manifest"], "required_artifacts_in": ["scene_plan"], "max_turns": 40, "temperature": 0.3},
     {"name": "edit",        "skill": "skills/pipelines/cinematic/edit-director.md",       "approval": False, "produces": ["edit_decisions"], "required_artifacts_in": ["scene_plan", "asset_manifest"], "temperature": 0.3},
-    {"name": "compose",     "skill": "skills/pipelines/cinematic/compose-director.md",    "approval": False, "produces": ["render_report", "final_review"], "required_artifacts_in": ["edit_decisions", "asset_manifest"], "temperature": 0.3},
+    # max_turns doubled vs. the global default (20), same rationale as
+    # "assets" above — compose is at least as tool-call-heavy (per-variant
+    # render calls, trim/stitch/color-grade/audio-mix passes, etc.) and
+    # confirmed live to hit the 20-turn ceiling on a real run.
+    {"name": "compose",     "skill": "skills/pipelines/cinematic/compose-director.md",    "approval": False, "produces": ["render_report", "final_review"], "required_artifacts_in": ["edit_decisions", "asset_manifest"], "max_turns": 40, "temperature": 0.3},
     {"name": "publish",     "skill": "skills/pipelines/cinematic/publish-director.md",    "approval": True,  "produces": ["publish_log"], "required_artifacts_in": ["render_report", "final_review"]},
 ]
 
@@ -175,6 +179,58 @@ class SamplePreviewNeeded(Exception):
         self.messages = messages
         self.preview_text = preview_text
         self.sample_iteration = sample_iteration
+
+
+class BudgetGateNeeded(Exception):
+    """Raised out of _run_agent_stage when a paid tool call is blocked by the
+    pre-call budget ceiling (a BudgetExceededError raised from
+    tool_bridge.py BEFORE the blocking call executes) — mirrors
+    SamplePreviewNeeded's resume-not-restart pattern above.
+
+    The previous behavior let the bare BudgetExceededError propagate straight
+    out of _run_agent_stage, discarding the local `messages` list entirely —
+    on approval the caller had no choice but to restart the whole stage
+    conversation from scratch (resume_messages stayed None), orphaning any
+    assets already generated earlier in that same stage's conversation.
+    `messages` here carries the conversation so far, INCLUDING a placeholder
+    tool-role response backfilled for the blocked tool_call_id and for every
+    sibling tool_call in that same assistant turn that was never reached —
+    OpenAI-style chat completions APIs require every tool_call in an
+    assistant turn to have a matching tool-role response before the next
+    turn is sent, so a conversation resumed without those would be rejected
+    as malformed on the very next completion call. `budget_exc` is the
+    original BudgetExceededError (carrying .tool_name/.est_cost/
+    .projected_cny per tool_bridge.py's contract) so the runner's budget
+    gate can show/re-arm using the actual blocked call, not just whatever
+    `cost_accumulator` already reflects (which does NOT include this call's
+    cost, since it never ran).
+    """
+
+    def __init__(self, messages: list[dict], preview_text: str, budget_exc: Exception):
+        super().__init__(preview_text)
+        self.messages = messages
+        self.preview_text = preview_text
+        self.budget_exc = budget_exc
+
+
+class JobCancelled(Exception):
+    """Raised the moment a user-requested cancellation (job.cancel_requested,
+    set by POST /jobs/{id}/cancel) is observed — from the per-turn loop in
+    _run_agent_stage, the per-stage loop in _run_pipeline_impl, or right after
+    any of the four wait_for_approval() calls (budget gate, sample-preview
+    gate, stage-boundary gate x2).
+
+    A generic "reject" action from wait_for_approval means something
+    different at every gate (budget: abort the job; sample-preview: try a
+    different approach and keep going; stage-boundary: regenerate with
+    feedback and keep going) — cancel_requested must be checked and handled
+    BEFORE any gate-specific reject logic runs, or a cancel routed through
+    set_approval(..., "reject", ...) would be silently reinterpreted as
+    "keep going" by the sample-preview and stage-boundary gates instead of
+    actually stopping the job. Always caught in run_pipeline_job, which is
+    the single place that marks the job cancelled and emits job_cancelled —
+    every raise site below just signals "stop", it never sets status itself.
+    """
 MAX_ROUNDS = 2   # bounded auto-retry when _run_agent_stage returns False (not the human reject loop, a separate mechanism below)
 # Cap each tool result appended to history. Must exceed tool_bridge.py's own
 # read_file cap (12000 chars) — otherwise a file near that size gets
@@ -203,6 +259,56 @@ def _truncate_json_for_prompt(text: str, cap: int) -> str:
     if len(text) <= cap:
         return text
     return text[:cap] + f"\n... [truncated — {len(text)} total chars]"
+
+
+# Prior-artifacts prompt budget (see _build_prior_artifacts_text below): a
+# stage's OWN required_artifacts_in list is what it actually needs to do its
+# job — each of those gets a generous, independent cap; everything else
+# shares one small combined budget placed after them. Confirmed live: by the
+# time "compose" runs, the combined artifact dump was >100,000 chars, and the
+# OLD flat 6000-char cap on the whole concatenated JSON blob (truncated
+# positionally — whatever sorted/iterated first) meant compose's own
+# required edit_decisions/asset_manifest never survived into the visible
+# window, crowded out by whatever came first (e.g. research_brief).
+_REQUIRED_ARTIFACT_PROMPT_CAP = 15000       # per required artifact, not combined
+_OTHER_ARTIFACTS_PROMPT_CAP_TOTAL = 2000    # shared budget for everything NOT required
+
+
+def _build_prior_artifacts_text(artifacts: dict[str, Any], required_names: list[str] | None) -> str:
+    """Build the '## Prior Artifacts' prompt section.
+
+    Required artifacts (this stage's own required_artifacts_in) are placed
+    first, each capped generously and independently; everything else shares
+    one small combined budget placed after them — so a stage's own required
+    input can never be crowded out by an unrelated artifact that merely
+    happens to iterate first, the way a single flat cap on the concatenated
+    JSON blob was.
+    """
+    required = set(required_names or [])
+    sections: list[str] = []
+
+    for name, value in artifacts.items():
+        if name not in required:
+            continue
+        dumped = json.dumps(value, ensure_ascii=False, indent=2)
+        sections.append(
+            f"### {name} (required by this stage)\n"
+            f"{_truncate_json_for_prompt(dumped, _REQUIRED_ARTIFACT_PROMPT_CAP)}"
+        )
+
+    remaining_budget = _OTHER_ARTIFACTS_PROMPT_CAP_TOTAL
+    for name, value in artifacts.items():
+        if name in required:
+            continue
+        if remaining_budget <= 0:
+            sections.append(f"### {name}\n[omitted — non-required-artifact budget exhausted]")
+            continue
+        dumped = json.dumps(value, ensure_ascii=False, indent=2)
+        capped = _truncate_json_for_prompt(dumped, remaining_budget)
+        sections.append(f"### {name}\n{capped}")
+        remaining_budget -= len(capped)
+
+    return "\n\n".join(sections) if sections else "(none)"
 
 
 def _last_failure_message(job_id: str, stage_name: str) -> str:
@@ -357,6 +463,7 @@ def _run_agent_stage(
     sample_iteration: int = 0,
     max_turns: int = MAX_TURNS,
     temperature: float = 0.7,
+    required_artifacts_in: list[str] | None = None,
 ) -> bool:
     """Run a single stage. Returns True on success, False on failure.
 
@@ -364,8 +471,9 @@ def _run_agent_stage(
     paused via SamplePreviewNeeded — when given, the stage's initial prompt
     is NOT rebuilt; the agent picks up exactly where it left off.
 
-    May raise BudgetExceededError if a paid tool call would cross budget_cny —
-    the caller catches it to drive the human budget gate.
+    May raise BudgetGateNeeded if a paid tool call would cross budget_cny —
+    the caller catches it to drive the human budget gate and resume the same
+    conversation afterward (see BudgetGateNeeded's docstring).
     """
 
     artifacts = _load_artifacts(project_dir)
@@ -470,7 +578,7 @@ variant's `run_openmontage_tool` (video_compose, operation="compose" or
 - Available artifacts from previous stages: {artifacts_summary}
 {brand_section}
 ## Prior Artifacts (content)
-{_truncate_json_for_prompt(json.dumps(artifacts, ensure_ascii=False, indent=2), 6000)}
+{_build_prior_artifacts_text(artifacts, required_artifacts_in)}
 
 ## User Feedback (if any)
 {feedback or "None — proceed normally."}
@@ -478,7 +586,12 @@ variant's `run_openmontage_tool` (video_compose, operation="compose" or
 {artifact_hint}
 
 ## Your job
-Execute the {stage_name} stage now. Use `read_file` to load additional skills or schemas as needed.
+Execute the {stage_name} stage now. Prior-stage artifacts you need are already
+fully inlined above under "## Prior Artifacts (content)" — do NOT use `read_file`
+to re-fetch artifacts/*.json, that data is already here. Use `read_file` only for
+skill docs or schemas you don't already have; pipeline-specific stage-director
+skills live at the literal path template `skills/pipelines/{{pipeline}}/{{stage}}-director.md`
+(substitute the real pipeline/stage names), never under `skills/core/...`.
 Use `run_openmontage_tool` to call generation tools (video, image, TTS, music).
 Use `write_artifact` to persist your output artifact when the stage is complete.
 After writing the artifact, confirm briefly what you produced.
@@ -496,6 +609,12 @@ After writing the artifact, confirm briefly what you produced.
     messages = list(resume_messages) if resume_messages is not None else [{"role": "user", "content": user_msg}]
 
     for turn in range(max_turns):
+        # Checked once per turn (not just between stages) since a single
+        # stage can run for minutes across many turns — job_store.get() is
+        # lock-guarded and safe to call from this thread (_run_agent_stage
+        # runs inside asyncio.to_thread, not the event loop itself).
+        if (job_store.get(job_id) or {}).get("cancel_requested"):
+            raise JobCancelled()
         try:
             response = llm.chat.completions.create(
                 model=LLM_MODEL,
@@ -575,7 +694,7 @@ After writing the artifact, confirm briefly what you produced.
         })
 
         # Execute each tool call
-        for tc in msg.tool_calls:
+        for tc_index, tc in enumerate(msg.tool_calls):
             tool_name = tc.function.name
             raw_args = tc.function.arguments or ""
             try:
@@ -653,10 +772,32 @@ After writing the artifact, confirm briefly what you produced.
                     base_cost=base_cost,
                     options=options,
                 )
-            except BudgetExceededError:
+            except BudgetExceededError as exc:
                 # Hard budget stop — unwind the stage so the runner's event loop
-                # can pause for the human budget decision.
-                raise
+                # can pause for the human budget decision. Restarting the whole
+                # conversation on approval (the old behavior: letting this
+                # propagate as a bare BudgetExceededError) would orphan any
+                # assets already generated earlier in this same stage's
+                # conversation — carry `messages` forward instead via
+                # BudgetGateNeeded (see its docstring) so the SAME conversation
+                # can resume. Backfill a placeholder tool-role response for
+                # THIS blocked tool_call_id, and for every sibling tool_call in
+                # this same assistant turn that was never reached (OpenAI-style
+                # chat completions APIs require every tool_call in an assistant
+                # turn to have a matching tool-role response before the next
+                # turn is sent, or the resumed conversation is malformed).
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": "BLOCKED: awaiting budget approval",
+                })
+                for remaining_tc in msg.tool_calls[tc_index + 1:]:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": remaining_tc.id,
+                        "content": "SKIPPED: stage paused for budget approval",
+                    })
+                raise BudgetGateNeeded(messages=messages, preview_text=str(exc), budget_exc=exc)
             except Exception as exc:
                 # A bare KeyError (e.g. a tool indexing inputs["some_field"]
                 # with no .get() fallback) stringifies to just "'some_field'"
@@ -721,6 +862,13 @@ async def run_pipeline_job(job_id: str, data: dict) -> None:
     _ACTIVE_JOB_IDS.add(job_id)
     try:
         await _run_pipeline_impl(job_id, data)
+    except JobCancelled:
+        # Single point of handling for every cancellation path (per-turn,
+        # per-stage, and all four approval-gate wait_for_approval sites) —
+        # see JobCancelled's docstring for why cancel_requested must be
+        # checked before any gate-specific reject logic runs.
+        job_store.update(job_id, status="cancelled")
+        _emit(job_id, {"type": "job_cancelled"})
     except Exception as exc:  # noqa: BLE001 — deliberate catch-all backstop
         import traceback
         job_store.update(job_id, status="failed")
@@ -787,11 +935,17 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
             "stage": stage_name,
         })
 
-    async def _budget_gate(force: bool = False) -> bool:
+    async def _budget_gate(force: bool = False, triggering_exc: Any = None) -> bool:
         """Pause for approval if over budget. Returns True to continue, False to abort.
 
         force=True pauses even when spent is still within budget — used when a
         pre-call check blocked the *next* paid call that would have crossed it.
+        triggering_exc, when given, is the BudgetExceededError (e.g. a
+        BudgetGateNeeded's .budget_exc) that caused a force=True pre-call
+        block — its .tool_name/.est_cost/.projected_cny attributes (per
+        tool_bridge.py's cross-file contract) drive both the approval preview
+        below and the re-arm ceiling, since `spent` at this point does NOT
+        include the cost of whatever call is currently blocked (it never ran).
         """
         nonlocal budget_cny
         if not budget_cny:
@@ -799,16 +953,41 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         spent = round(base_cost + sum(cost_accumulator), 4)
         if spent <= budget_cny and not force:
             return True
+        blocked_tool_name = getattr(triggering_exc, "tool_name", None) if triggering_exc is not None else None
+        blocked_est_cost = getattr(triggering_exc, "est_cost", None) if triggering_exc is not None else None
+        projected_cny = getattr(triggering_exc, "projected_cny", None) if triggering_exc is not None else None
         job_store.update(job_id, status="awaiting_approval")
+        preview: dict[str, Any] = {
+            "spent_cny": spent, "budget_cny": budget_cny,
+            "over_by_cny": round(spent - budget_cny, 4),
+        }
+        budget_exceeded_event: dict[str, Any] = {
+            "type": "budget_exceeded", "spent_cny": spent, "budget_cny": budget_cny,
+        }
+        if force and (blocked_tool_name is not None or blocked_est_cost is not None):
+            # A pre-call block can fire while spent <= budget_cny (the
+            # blocking call hasn't executed yet, so it isn't in `spent` at
+            # all) — over_by_cny above would then be negative, showing "job
+            # is under budget" while asking the user to approve an apparent
+            # overspend, with no visibility into which call actually
+            # triggered it. Name the blocking call explicitly instead of
+            # relying on the generic spent/budget_cny/over_by_cny shape alone.
+            preview["blocked_tool_name"] = blocked_tool_name
+            preview["blocked_est_cost_cny"] = blocked_est_cost
+            preview["projected_cny"] = projected_cny
+            budget_exceeded_event["blocked_tool_name"] = blocked_tool_name
+            budget_exceeded_event["blocked_est_cost_cny"] = blocked_est_cost
+            budget_exceeded_event["projected_cny"] = projected_cny
         _emit(job_id, {
             "type": "awaiting_approval",
             "stage": "budget",
             "gate": "budget",
-            "preview": {"spent_cny": spent, "budget_cny": budget_cny,
-                        "over_by_cny": round(spent - budget_cny, 4)},
+            "preview": preview,
         })
-        _emit(job_id, {"type": "budget_exceeded", "spent_cny": spent, "budget_cny": budget_cny})
+        _emit(job_id, budget_exceeded_event)
         approval = await job_store.wait_for_approval(job_id, timeout=3600.0)
+        if (job_store.get(job_id) or {}).get("cancel_requested"):
+            raise JobCancelled()
         if approval["action"] == "reject":
             job_store.update(job_id, status="failed")
             _emit(job_id, {"type": "job_failed", "stage": "budget",
@@ -822,13 +1001,31 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         # lets the stage that triggered this approval proceed without an
         # immediate re-prompt for the exact same overage, while still gating
         # again if a LATER stage blows through this new ceiling.
+        #
+        # On the force=True pre-call-block path, `spent` does NOT include the
+        # blocked call's own cost (it never ran) — re-arming off spent*1.2
+        # alone can land BELOW what that call actually needs (or even below
+        # the previous ceiling), permanently re-blocking the identical call on
+        # every future approval. Use the blocked call's own projected_cny (the
+        # spend IF it's admitted) as a floor, together with the previous
+        # ceiling, so the new ceiling never drops below either.
         old_budget_cny = budget_cny
-        budget_cny = round(spent * 1.2, 4)
+        if force and projected_cny is not None:
+            budget_cny = round(max(budget_cny, projected_cny) * 1.2, 4)
+        else:
+            budget_cny = round(spent * 1.2, 4)
         if cost_tracker is not None:
             # Keep the ledger's recorded ceiling in sync for anything
             # inspecting cost_log.json. A direct in-memory attribute bump —
             # not a new CostTracker method or any other change to
             # tools/cost_tracker.py — to stay clear of that file entirely.
+            # Safe only because this assignment always runs on the event
+            # loop after the stage's asyncio.to_thread call has fully
+            # returned — i.e. nothing else is concurrently calling
+            # cost_tracker.reserve() (which reads this same attribute while
+            # holding cost_tracker._lock) at this moment. A future change
+            # that lets a stage's thread keep running past this point (e.g.
+            # concurrent stages) must not bypass that lock here.
             cost_tracker.budget_total_usd = budget_cny
         job_store.update(job_id, status="running")
         _emit(job_id, {
@@ -857,6 +1054,8 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
             },
         })
         approval = await job_store.wait_for_approval(job_id, timeout=3600.0)
+        if (job_store.get(job_id) or {}).get("cancel_requested"):
+            raise JobCancelled()
         job_store.update(job_id, status="running")
         if approval["action"] == "reject":
             fb = approval.get("feedback") or "Not approved as-is — reconsider your approach."
@@ -879,6 +1078,13 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         stage_name = stage_def["name"]
         skill_rel = stage_def.get("skill")
         needs_approval = stage_def["approval"]
+
+        # Catches a job cancelled while queued (never got as far as a single
+        # stage) and one cancelled between stages while running — the
+        # per-turn check inside _run_agent_stage handles cancellation
+        # mid-stage.
+        if (job_store.get(job_id) or {}).get("cancel_requested"):
+            raise JobCancelled()
 
         # Resume support: a retry must NOT re-run or overwrite stages that already
         # finished (and, for approval stages, were already approved).
@@ -945,9 +1151,28 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                     resume_messages, sample_iteration,
                     max_turns=stage_def.get("max_turns", MAX_TURNS),
                     temperature=stage_def.get("temperature", 0.7),
+                    required_artifacts_in=stage_def.get("required_artifacts_in"),
                 )
                 resume_messages = None
+            except BudgetGateNeeded as bgn:
+                _sync_cost(stage_name)
+                if not await _budget_gate(force=True, triggering_exc=bgn.budget_exc):
+                    return
+                # Resume the SAME conversation (not a fresh one) at the newly
+                # re-armed ceiling — restarting from scratch would orphan any
+                # assets already generated earlier in this stage's
+                # conversation (see BudgetGateNeeded's docstring).
+                resume_messages = bgn.messages + [{
+                    "role": "user",
+                    "content": f"Budget approved at new ceiling ¥{budget_cny} — retry the blocked call.",
+                }]
+                continue   # resume, doesn't consume a retry round
             except BudgetExceededError:
+                # Defensive fallback: a raw BudgetExceededError reaching here
+                # unwrapped (the normal tool-call path in _run_agent_stage
+                # always converts it to BudgetGateNeeded first, preserving
+                # `messages`) — fall back to the old restart-from-scratch
+                # behavior rather than crash.
                 _sync_cost(stage_name)
                 if not await _budget_gate(force=True):
                     return
@@ -1002,6 +1227,20 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
             })
             return
 
+        # Nothing else validates that edit_decisions.render_runtime matches
+        # what was actually locked at proposal — confirmed live: proposal
+        # locked a render_runtime with an explicit decision_log entry
+        # demanding "no silent fallback to FFmpeg", yet edit_decisions
+        # silently switched to 'ffmpeg' with no new decision_log entry and no
+        # escalation, and the edit stage has no human approval gate to catch
+        # it. See _check_render_runtime_consistency's docstring.
+        if stage_name == "edit":
+            runtime_mismatch = _check_render_runtime_consistency(project_dir)
+            if runtime_mismatch:
+                job_store.update(job_id, status="failed", current_stage=stage_name)
+                _emit(job_id, {"type": "job_failed", "stage": stage_name, "message": runtime_mismatch})
+                return
+
         # The compose stage's render_report/final_review artifacts existing
         # (checked above) is NOT proof a video actually got rendered — a
         # video_compose call can fail, and confirmed live: an agent that hit
@@ -1012,19 +1251,73 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         # "completed" with zero actual deliverable. Require a real file under
         # renders/ (the same glob the preview/final-video UI relies on) —
         # don't trust the artifact's own claims about what it produced.
-        if stage_name == "compose" and not _discover_render_url(project_dir, project_name):
-            job_store.update(job_id, status="failed", current_stage=stage_name)
-            _emit(job_id, {
-                "type": "job_failed",
-                "stage": stage_name,
-                "message": (
-                    "Stage 'compose' wrote render_report/final_review but no actual "
-                    f"render file exists under {project_dir / 'renders'} — the "
-                    "report's claimed output isn't backed by a real file. Retry will "
-                    "re-run this stage."
-                ),
-            })
-            return
+        if stage_name == "compose":
+            _compose_render_path = _discover_render_path(project_dir)
+            if _compose_render_path is None:
+                job_store.update(job_id, status="failed", current_stage=stage_name)
+                _emit(job_id, {
+                    "type": "job_failed",
+                    "stage": stage_name,
+                    "message": (
+                        "Stage 'compose' wrote render_report/final_review but no actual "
+                        f"render file exists under {project_dir / 'renders'} — the "
+                        "report's claimed output isn't backed by a real file. Retry will "
+                        "re-run this stage."
+                    ),
+                })
+                return
+            # render_report's own claims (output path here; runtime/counts
+            # elsewhere) are never cross-validated against reality otherwise
+            # — confirmed live: render_report claimed a DIFFERENT output
+            # filename than the one actually discovered on disk. A wrong
+            # internal path claim while a real file DOES exist is
+            # lower-severity than no file at all (handled above) — warn,
+            # don't fail the stage.
+            _render_report = _load_artifacts(project_dir).get("render_report") or {}
+            _claimed_path_mismatch = _render_report_path_diverges(
+                project_dir, _render_report, _compose_render_path
+            )
+            if _claimed_path_mismatch:
+                _emit(job_id, {
+                    "type": "warning",
+                    "stage": stage_name,
+                    "message": (
+                        f"render_report claims output path '{_claimed_path_mismatch}' but "
+                        "the actual discovered render file is "
+                        f"'{_compose_render_path.relative_to(project_dir)}' — the report's "
+                        "internal path claim doesn't match reality (a real file does "
+                        "exist, so the stage still proceeds)."
+                    ),
+                })
+
+        # The generalized anti-fabrication check above (compose/
+        # render_report) has no equivalent for other stages that also
+        # declare file-backed exports — confirmed live: a publish_log
+        # artifact claimed 5 real export files (teaser cut, platform-specific
+        # crops, poster frame) that were never generated (no exports/
+        # directory ever created, zero video-processing tool calls in that
+        # stage's trace). Key off the completing stage's declared `produces`
+        # contract rather than a literal stage-name check, so this holds for
+        # any current/future stage whose produces includes a validated
+        # artifact name (see _PRODUCES_EXPORT_VALIDATORS).
+        for _artifact_name, _validator in _PRODUCES_EXPORT_VALIDATORS.items():
+            if _artifact_name not in (stage_def.get("produces") or []):
+                continue
+            _artifact_value = _load_artifacts(project_dir).get(_artifact_name) or {}
+            _missing_exports = _validator(project_dir, _artifact_value)
+            if _missing_exports:
+                job_store.update(job_id, status="failed", current_stage=stage_name)
+                _emit(job_id, {
+                    "type": "job_failed",
+                    "stage": stage_name,
+                    "message": (
+                        f"Stage '{stage_name}' wrote {_artifact_name} claiming export(s) "
+                        f"{_missing_exports}, but no file exists at that path under "
+                        f"{project_dir} — the artifact's claimed output isn't backed by a "
+                        "real file. Retry will re-run this stage."
+                    ),
+                })
+                return
 
         # The check above only requires ANY render file to exist — in a
         # multi-variant A/B job (options.video_model_variants declares more
@@ -1093,6 +1386,8 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
             job_store.update(job_id, status="awaiting_approval")
             _emit(job_id, {"type": "awaiting_approval", "stage": stage_name, "preview": _preview()})
             approval = await job_store.wait_for_approval(job_id, timeout=3600.0)
+            if (job_store.get(job_id) or {}).get("cancel_requested"):
+                raise JobCancelled()
 
             while approval["action"] == "reject":
                 feedback = approval.get("feedback", "")
@@ -1119,10 +1414,24 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                             resume_messages, sample_iteration,
                             max_turns=stage_def.get("max_turns", MAX_TURNS),
                             temperature=stage_def.get("temperature", 0.7),
+                            required_artifacts_in=stage_def.get("required_artifacts_in"),
                         )
                         resume_messages = None
                         break
+                    except BudgetGateNeeded as bgn:
+                        _sync_cost(stage_name)
+                        if not await _budget_gate(force=True, triggering_exc=bgn.budget_exc):
+                            return
+                        # Resume the SAME conversation at the raised ceiling —
+                        # see BudgetGateNeeded's docstring.
+                        resume_messages = bgn.messages + [{
+                            "role": "user",
+                            "content": f"Budget approved at new ceiling ¥{budget_cny} — retry the blocked call.",
+                        }]
+                        continue   # resume, doesn't consume a retry round
                     except BudgetExceededError:
+                        # Defensive fallback — see the initial-run loop above
+                        # for why this shouldn't normally trigger.
                         _sync_cost(stage_name)
                         if not await _budget_gate(force=True):
                             return
@@ -1179,6 +1488,8 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                 job_store.update(job_id, status="awaiting_approval")
                 _emit(job_id, {"type": "awaiting_approval", "stage": stage_name, "preview": _preview()})
                 approval = await job_store.wait_for_approval(job_id, timeout=3600.0)
+                if (job_store.get(job_id) or {}).get("cancel_requested"):
+                    raise JobCancelled()
 
             job_store.update(job_id, status="running")
             _emit(job_id, {"type": "stage_approved", "stage": stage_name})
@@ -1251,8 +1562,13 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
 _COMPOSE_FAMILY_TOOL_PREFIXES = ("video_compose_", "hyperframes_compose_")
 
 
-def _discover_render_url(project_dir: Path, project_name: str) -> str | None:
-    """Find the final rendered video and return a browser-servable /media URL."""
+def _discover_render_path(project_dir: Path) -> Path | None:
+    """Find the final rendered video file on disk, or None if none exists.
+
+    Extracted out of _discover_render_url so a caller that needs the actual
+    Path (not just a servable URL) — e.g. cross-validating render_report's
+    own claimed output path against reality — doesn't have to re-derive it.
+    """
     def _newest(paths: list[Path]) -> Path | None:
         existing = [p for p in paths if p.is_file()]
         if not existing:
@@ -1284,9 +1600,123 @@ def _discover_render_url(project_dir: Path, project_name: str) -> str | None:
         # Last resort: a misnamed compose output (.bin) that is really an mp4
         candidate = _newest(list(project_dir.glob("assets/video_post/*compose*output*")))
 
+    return candidate
+
+
+def _discover_render_url(project_dir: Path, project_name: str) -> str | None:
+    """Find the final rendered video and return a browser-servable /media URL."""
+    candidate = _discover_render_path(project_dir)
     if candidate is None:
         return None
     return _url_for_render(project_dir, project_name, candidate)
+
+
+def _render_report_path_diverges(
+    project_dir: Path, render_report: dict, discovered: Path | None
+) -> str | None:
+    """Return render_report's own claimed output path if it differs from the
+    actually-discovered render file, else None.
+
+    Confirmed live: even in a run that passed the render-file-existence
+    check (a real mp4 existed), render_report claimed a DIFFERENT output
+    filename than the one actually discovered. A wrong internal path claim
+    while a real file DOES exist is lower-severity than no file at all
+    (already hard-failed separately) — this only informs, it never fails
+    the stage.
+    """
+    if discovered is None:
+        return None
+    outputs = (render_report or {}).get("outputs") or []
+    if not outputs:
+        return None
+    claimed = outputs[0].get("path")
+    if not claimed:
+        return None
+    try:
+        claimed_resolved = (project_dir / claimed).resolve()
+    except OSError:
+        return claimed
+    if claimed_resolved != discovered.resolve():
+        return claimed
+    return None
+
+
+def _validate_publish_log_exports(project_dir: Path, publish_log: dict) -> list[str]:
+    """Return the publish_log-claimed export_paths that have NO real file on
+    disk, for every entry whose status implies a file was actually produced.
+
+    Confirmed live: a publish_log artifact claimed 5 real export files
+    (teaser cut, platform-specific crops, poster frame) that were never
+    generated — no exports/ directory ever created, zero video-processing
+    tool calls in that stage's trace. Per schemas/artifacts/publish_log.
+    schema.json, "exported" and "draft" are the statuses that imply a real
+    file was written (as opposed to "published"/a remote upload with no
+    local file, "failed", or "pending_review").
+    """
+    missing: list[str] = []
+    for entry in (publish_log or {}).get("entries", []):
+        if not isinstance(entry, dict):
+            continue
+        status = entry.get("status")
+        export_path = entry.get("export_path")
+        if status in ("exported", "draft") and export_path:
+            if not (project_dir / export_path).is_file():
+                missing.append(export_path)
+    return missing
+
+
+# Stage-produces artifact name -> validator that checks its file-backed
+# claims against reality. Generalizes the compose/render_report
+# anti-fabrication check above to any stage whose `produces` declares one of
+# these artifacts, rather than keying off a literal stage name — starting
+# with the concrete publish_log case (see _validate_publish_log_exports).
+_PRODUCES_EXPORT_VALIDATORS = {
+    "publish_log": _validate_publish_log_exports,
+}
+
+
+def _check_render_runtime_consistency(project_dir: Path) -> str | None:
+    """Return a failure message if edit_decisions.render_runtime silently
+    diverges from the render_runtime locked at proposal
+    (proposal_packet.production_plan.render_runtime) with no decision_log
+    entry justifying the change — else None.
+
+    Confirmed live: proposal locked a Remotion-vs-HyperFrames decision with
+    an explicit decision_log entry saying "must use selected render_runtime
+    without silent fallback to FFmpeg ... if unavailable, surface blocker to
+    user", yet edit_decisions silently set render_runtime='ffmpeg' with no
+    new decision_log entry and no escalation — the edit stage has no human
+    approval gate to catch this on its own. A justifying entry must be
+    logged with stage="edit" specifically (not just the original
+    proposal-stage render_runtime_selection entry that locked the value in
+    the first place) — otherwise every divergence would trivially "pass"
+    just because a render_runtime_selection entry exists somewhere from
+    proposal.
+    """
+    artifacts = _load_artifacts(project_dir)
+    edit_decisions = artifacts.get("edit_decisions") or {}
+    proposal_packet = artifacts.get("proposal_packet") or {}
+    edit_runtime = edit_decisions.get("render_runtime")
+    locked_runtime = (proposal_packet.get("production_plan") or {}).get("render_runtime")
+    if not edit_runtime or not locked_runtime or edit_runtime == locked_runtime:
+        return None
+    decision_log = artifacts.get("decision_log") or {}
+    justified = any(
+        isinstance(d, dict)
+        and d.get("category") == "render_runtime_selection"
+        and d.get("stage") == "edit"
+        for d in (decision_log.get("decisions") or [])
+    )
+    if justified:
+        return None
+    return (
+        f"Stage 'edit' set edit_decisions.render_runtime='{edit_runtime}', which "
+        f"diverges from the render_runtime locked at proposal "
+        f"('{locked_runtime}', proposal_packet.production_plan.render_runtime), with "
+        "no decision_log entry (category='render_runtime_selection', stage='edit') "
+        f"justifying the change. Either match the locked runtime ('{locked_runtime}') "
+        "or log a proper decision_log entry explaining the override."
+    )
 
 
 def _missing_variants(project_dir: Path, options: dict) -> list[str] | None:

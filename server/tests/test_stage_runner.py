@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +12,9 @@ from app.runner.stage_runner import (
     _discover_render_url, _discover_render_urls, _load_artifacts, _load_brand_kit,
     _brand_reference_image_data_uri, _MAX_REFERENCE_DATA_URI_CHARS,
     _truncate_json_for_prompt, _last_failure_message, _missing_variants,
-    _url_for_render,
+    _url_for_render, _discover_render_path, _render_report_path_diverges,
+    _validate_publish_log_exports, _check_render_runtime_consistency,
+    _build_prior_artifacts_text,
 )
 
 
@@ -305,6 +308,46 @@ def test_no_tool_calls_ends_stage(tmp_path, monkeypatch):
     ok = stage_runner._run_agent_stage("job-y", "research", "skill", tmp_path, {}, {})
     assert ok is True
     assert not (tmp_path / "artifacts").exists()  # no tool ran
+
+
+# ── cancellation: checked once per turn, not just between stages ────────────
+
+def test_cancel_requested_stops_mid_turn_without_calling_the_llm(tmp_path, monkeypatch):
+    # A single stage can run for many minutes across many turns (confirmed
+    # live: compose hit its turn ceiling) — cancellation must be checked
+    # every turn, not just at stage boundaries, or a user cancelling a
+    # long-running stage would wait for it to finish anyway. The check must
+    # also run BEFORE the LLM call so a cancelled job doesn't burn one more
+    # (paid, slow) completion request first.
+    from app.store import JobStore
+    ts = JobStore(persist_dir=tmp_path / "js")
+    monkeypatch.setattr(stage_runner, "job_store", ts)
+    ts.create("job-cancel", {})
+    ts.update("job-cancel", cancel_requested=True)
+
+    llm_called = []
+    monkeypatch.setattr(
+        stage_runner.llm.chat.completions, "create",
+        lambda **kw: llm_called.append(1) or _resp("should never run", None, "stop"),
+    )
+
+    with pytest.raises(stage_runner.JobCancelled):
+        stage_runner._run_agent_stage("job-cancel", "research", "skill", tmp_path, {}, {})
+    assert llm_called == []
+
+
+def test_no_cancellation_requested_runs_normally(tmp_path, monkeypatch):
+    # Sibling of the test above — confirms the cancel_requested check itself
+    # doesn't false-positive and block an ordinary run.
+    from app.store import JobStore
+    ts = JobStore(persist_dir=tmp_path / "js")
+    monkeypatch.setattr(stage_runner, "job_store", ts)
+    ts.create("job-ok", {})
+
+    resp = _resp("nothing to do", None, "stop")
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", lambda **kw: resp)
+
+    assert stage_runner._run_agent_stage("job-ok", "research", "skill", tmp_path, {}, {}) is True
 
 
 # ── mid-stage stall nudging (agent stops to ask, artifact not written) ──────
@@ -702,3 +745,261 @@ def test_run_agent_stage_honors_custom_max_turns_and_temperature(tmp_path, monke
     assert ok is False   # exhausted max_turns without completing
     assert captured["calls"] == 3   # bounded by the custom max_turns, not the global default
     assert captured["temperature"] == 0.3
+
+
+def test_compose_stage_has_higher_max_turns():
+    # Regression: compose is at least as tool-call-heavy as "assets" (which
+    # already has max_turns=40 with a rationale comment) but stayed at the
+    # global default (20) — confirmed live: compose hit the 20-turn ceiling
+    # in a real run.
+    compose = next(s for s in stage_runner.CINEMATIC_STAGES if s["name"] == "compose")
+    assert compose["max_turns"] > stage_runner.MAX_TURNS
+
+
+# ── prior-artifacts prompt budget: required artifacts must survive bloat ────
+
+def test_build_prior_artifacts_text_required_survives_large_unrelated_ones():
+    # Regression: a flat 6000-char cap on the whole concatenated prior-
+    # artifacts JSON blob, truncated positionally, meant a stage's own
+    # required_artifacts_in artifact routinely never survived into the
+    # visible window once the combined dump grew large (confirmed live at
+    # "compose": >100,000 combined chars, edit_decisions/asset_manifest
+    # crowded out by research_brief). The required artifact's actual content
+    # must survive in full even surrounded by several large unrelated ones.
+    marker = "UNIQUE_REQUIRED_MARKER_VALUE"
+    artifacts = {f"unrelated_{i}": {"blob": "x" * 30000} for i in range(5)}
+    artifacts["needed_artifact"] = {"key": marker}
+
+    text = _build_prior_artifacts_text(artifacts, ["needed_artifact"])
+
+    assert marker in text   # actual content, not just a truncation marker
+    assert "needed_artifact" in text
+
+
+def test_build_prior_artifacts_text_caps_non_required_combined():
+    artifacts = {f"unrelated_{i}": {"blob": "x" * 30000} for i in range(5)}
+    text = _build_prior_artifacts_text(artifacts, [])
+    # None of these are required — total non-required budget is small, so the
+    # combined output must be much smaller than the raw 150,000 chars of blob.
+    assert len(text) < 10000
+
+
+def test_prior_artifacts_required_survives_via_run_agent_stage(tmp_path, monkeypatch):
+    # End-to-end through _run_agent_stage's actual prompt construction (not
+    # just the helper in isolation).
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    marker = "UNIQUE_REQUIRED_MARKER_" + "z" * 50
+    (artifacts_dir / "needed_artifact.json").write_text(json.dumps({"key": marker}))
+    for i in range(5):
+        (artifacts_dir / f"unrelated_{i}.json").write_text(json.dumps({"blob": "x" * 30000}))
+
+    resp = _resp("done", None, "stop")
+    captured = {}
+    def fake_create(**kw):
+        captured["messages"] = kw["messages"]
+        return resp
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    stage_runner._run_agent_stage(
+        "job-req", "compose", "skill", tmp_path, {}, {},
+        required_artifacts_in=["needed_artifact"],
+    )
+    user_msg = captured["messages"][0]["content"]
+    assert marker in user_msg
+
+
+# ── "Your job" section: no re-fetching inlined artifacts via read_file ─────
+
+def test_prompt_tells_agent_not_to_refetch_artifacts_and_gives_skill_path_template(tmp_path, monkeypatch):
+    # Confirmed live: agents repeatedly guessed wrong artifact/skill-doc
+    # paths via read_file across nearly every stage — wasting turns re-
+    # fetching data that's already inlined, and guessing nonexistent
+    # skills/core/... paths for pipeline-specific skill docs.
+    resp = _resp("done", None, "stop")
+    captured = {}
+    def fake_create(**kw):
+        captured["messages"] = kw["messages"]
+        return resp
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", fake_create)
+
+    stage_runner._run_agent_stage("job-nofetch", "compose", "skill", tmp_path, {}, {})
+    user_msg = captured["messages"][0]["content"]
+    assert "do NOT use `read_file`" in user_msg
+    assert "fully inlined above" in user_msg
+    assert "skills/pipelines/{pipeline}/{stage}-director.md" in user_msg
+    assert "skills/core/" in user_msg
+
+
+# ── BudgetGateNeeded: converted from BudgetExceededError with valid resume ──
+
+def test_budget_gate_needed_backfills_placeholders_for_blocked_and_sibling_calls(tmp_path, monkeypatch):
+    # Regression: BudgetExceededError used to propagate straight out of
+    # _run_agent_stage, discarding `messages` entirely — on approval the
+    # caller had no choice but to restart the whole stage conversation from
+    # scratch, orphaning any assets already generated earlier in that same
+    # conversation. It must now be converted to BudgetGateNeeded carrying the
+    # conversation so far, with a placeholder tool-role response backfilled
+    # for the blocked call AND for every sibling tool_call in the same
+    # assistant turn that was never reached — every tool_call in an assistant
+    # turn needs a matching tool response, or the next completion call would
+    # be malformed.
+    turn1 = _resp(
+        "working",
+        [
+            _tool_call("c1", "run_openmontage_tool", '{"tool_name": "maas_video", "inputs": {}}'),
+            _tool_call("c2", "run_openmontage_tool", '{"tool_name": "maas_video", "inputs": {}}'),
+            _tool_call("c3", "run_openmontage_tool", '{"tool_name": "maas_video", "inputs": {}}'),
+        ],
+        "stop",
+    )
+    monkeypatch.setattr(stage_runner.llm.chat.completions, "create", lambda **kw: turn1)
+
+    call_count = {"n": 0}
+    def fake_execute_tool(tool_name, tool_args, project_dir, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return '{"success": true}'
+        # tool_bridge.py's BudgetExceededError.tool_name carries the actual
+        # sub-tool called (e.g. "maas_video"), not the dispatch-level
+        # "run_openmontage_tool" name — mirror that here.
+        raise stage_runner.BudgetExceededError(
+            "over budget", tool_name="maas_video", est_cost=50.0, projected_cny=60.0,
+        )
+    monkeypatch.setattr(stage_runner, "execute_tool", fake_execute_tool)
+
+    with pytest.raises(stage_runner.BudgetGateNeeded) as exc_info:
+        stage_runner._run_agent_stage("job-bgn", "assets", "skill", tmp_path, {}, {})
+
+    bgn = exc_info.value
+    tool_msgs = {m["tool_call_id"]: m["content"] for m in bgn.messages if m.get("role") == "tool"}
+    assert tool_msgs["c1"] == '{"success": true}'          # already ran, untouched
+    assert "BLOCKED" in tool_msgs["c2"]                     # the call that actually blocked
+    assert "SKIPPED" in tool_msgs["c3"]                     # sibling never reached
+    assert bgn.budget_exc.tool_name == "maas_video"
+    assert bgn.budget_exc.projected_cny == 60.0
+    # Only 2 tool calls actually executed — the 3rd never ran.
+    assert call_count["n"] == 2
+
+
+# ── render_report path divergence (warn, don't fail) ────────────────────────
+
+def test_render_report_path_diverges_flags_mismatch(tmp_path):
+    (tmp_path / "renders").mkdir()
+    discovered = tmp_path / "renders" / "final.mp4"
+    discovered.write_bytes(b"x")
+    render_report = {"outputs": [{"path": "renders/wrong_name.mp4"}]}
+    assert _render_report_path_diverges(tmp_path, render_report, discovered) == "renders/wrong_name.mp4"
+
+
+def test_render_report_path_diverges_none_when_matching(tmp_path):
+    (tmp_path / "renders").mkdir()
+    discovered = tmp_path / "renders" / "final.mp4"
+    discovered.write_bytes(b"x")
+    render_report = {"outputs": [{"path": "renders/final.mp4"}]}
+    assert _render_report_path_diverges(tmp_path, render_report, discovered) is None
+
+
+def test_render_report_path_diverges_none_without_outputs_or_discovery():
+    assert _render_report_path_diverges(SimpleNamespace(), {}, None) is None
+    assert _render_report_path_diverges(SimpleNamespace(), {"outputs": []}, None) is None
+
+
+# ── publish_log export validation (generalized anti-fabrication) ───────────
+
+def test_validate_publish_log_exports_flags_missing_file(tmp_path):
+    publish_log = {"entries": [
+        {"platform": "youtube", "status": "exported",
+         "export_path": "exports/teaser.mp4", "timestamp": "2026-01-01T00:00:00Z"},
+    ]}
+    assert _validate_publish_log_exports(tmp_path, publish_log) == ["exports/teaser.mp4"]
+
+
+def test_validate_publish_log_exports_passes_when_file_exists(tmp_path):
+    (tmp_path / "exports").mkdir()
+    (tmp_path / "exports" / "teaser.mp4").write_bytes(b"x")
+    publish_log = {"entries": [
+        {"platform": "youtube", "status": "exported",
+         "export_path": "exports/teaser.mp4", "timestamp": "2026-01-01T00:00:00Z"},
+    ]}
+    assert _validate_publish_log_exports(tmp_path, publish_log) == []
+
+
+def test_validate_publish_log_exports_ignores_non_completed_statuses(tmp_path):
+    # "failed"/"pending_review" entries don't claim a real file was produced
+    # — must not be flagged even though no file exists.
+    publish_log = {"entries": [
+        {"platform": "youtube", "status": "pending_review",
+         "export_path": "exports/teaser.mp4", "timestamp": "x"},
+        {"platform": "instagram", "status": "failed",
+         "export_path": "exports/nope.mp4", "timestamp": "x"},
+    ]}
+    assert _validate_publish_log_exports(tmp_path, publish_log) == []
+
+
+# ── render_runtime consistency (edit vs. proposal, unlogged divergence) ─────
+
+def test_render_runtime_consistency_flags_silent_divergence(tmp_path):
+    (tmp_path / "artifacts").mkdir()
+    (tmp_path / "artifacts" / "proposal_packet.json").write_text(
+        json.dumps({"production_plan": {"render_runtime": "remotion"}})
+    )
+    (tmp_path / "artifacts" / "edit_decisions.json").write_text(
+        json.dumps({"render_runtime": "ffmpeg"})
+    )
+    msg = _check_render_runtime_consistency(tmp_path)
+    assert msg is not None
+    assert "remotion" in msg and "ffmpeg" in msg
+
+
+def test_render_runtime_consistency_passes_when_matching(tmp_path):
+    (tmp_path / "artifacts").mkdir()
+    (tmp_path / "artifacts" / "proposal_packet.json").write_text(
+        json.dumps({"production_plan": {"render_runtime": "remotion"}})
+    )
+    (tmp_path / "artifacts" / "edit_decisions.json").write_text(
+        json.dumps({"render_runtime": "remotion"})
+    )
+    assert _check_render_runtime_consistency(tmp_path) is None
+
+
+def test_render_runtime_consistency_passes_when_justified_by_decision_log(tmp_path):
+    (tmp_path / "artifacts").mkdir()
+    (tmp_path / "artifacts" / "proposal_packet.json").write_text(
+        json.dumps({"production_plan": {"render_runtime": "remotion"}})
+    )
+    (tmp_path / "artifacts" / "edit_decisions.json").write_text(
+        json.dumps({"render_runtime": "ffmpeg"})
+    )
+    (tmp_path / "artifacts" / "decision_log.json").write_text(json.dumps({
+        "decisions": [{
+            "decision_id": "d-002", "stage": "edit", "category": "render_runtime_selection",
+            "subject": "runtime override",
+            "options_considered": [{"option_id": "o1", "label": "ffmpeg", "score": 1, "reason": "y"}],
+            "selected": "o1", "reason": "remotion unavailable",
+        }],
+    }))
+    assert _check_render_runtime_consistency(tmp_path) is None
+
+
+def test_render_runtime_consistency_ignores_decision_logged_at_a_different_stage(tmp_path):
+    # A render_runtime_selection entry logged at "proposal" (the ORIGINAL
+    # decision that locked the value) must not by itself excuse a later
+    # silent divergence introduced at "edit" — only a NEW entry logged at
+    # "edit" specifically justifies the override.
+    (tmp_path / "artifacts").mkdir()
+    (tmp_path / "artifacts" / "proposal_packet.json").write_text(
+        json.dumps({"production_plan": {"render_runtime": "remotion"}})
+    )
+    (tmp_path / "artifacts" / "edit_decisions.json").write_text(
+        json.dumps({"render_runtime": "ffmpeg"})
+    )
+    (tmp_path / "artifacts" / "decision_log.json").write_text(json.dumps({
+        "decisions": [{
+            "decision_id": "d-001", "stage": "proposal", "category": "render_runtime_selection",
+            "subject": "initial runtime choice",
+            "options_considered": [{"option_id": "o1", "label": "remotion", "score": 1, "reason": "y"}],
+            "selected": "o1", "reason": "best fit",
+        }],
+    }))
+    assert _check_render_runtime_consistency(tmp_path) is not None

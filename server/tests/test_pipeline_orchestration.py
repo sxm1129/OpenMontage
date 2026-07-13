@@ -7,6 +7,7 @@ runner's control flow — the area where most of this session's fixes landed.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -749,3 +750,452 @@ async def test_budget_gate_rearms_at_higher_ceiling_instead_of_disabling(runner,
     # stays flat) as spend grows.
     assert seen_budget == sorted(seen_budget)
     assert len(set(seen_budget)) > 1
+
+
+async def test_budget_gate_rearm_uses_projected_cost_not_just_spent(runner, monkeypatch, tmp_path):
+    # Regression: on the pre-call-block path, `spent` (base_cost +
+    # cost_accumulator) does NOT include the cost of the call that is
+    # actually blocked — that call never ran. budget_cny=10, first paid call
+    # est_cost=50 (nothing spent yet, cost_accumulator=[]) → the OLD formula
+    # re-armed to round(0 * 1.2, 4) == 0, LOWER than the original ceiling, so
+    # the identical call would be blocked again forever. The re-arm must
+    # instead use max(old_ceiling, projected_cny) so it's always enough to
+    # admit the blocking call.
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
+
+    budget_exc = stage_runner.BudgetExceededError(
+        "over budget", tool_name="maas_video", est_cost=50.0, projected_cny=50.0,
+    )
+    seen_budget = []
+
+    def flaky_research(*a, **k):
+        seen_budget.append(a[9])   # budget_cny positional arg
+        resume_messages = a[12]
+        if resume_messages is None:
+            raise stage_runner.BudgetGateNeeded(
+                messages=[{"role": "user", "content": "orig"}],
+                preview_text="blocked", budget_exc=budget_exc,
+            )
+        return True
+
+    def dispatch(*a, **k):
+        stage_name = a[1]
+        return (flaky_research if stage_name == "research" else (lambda *a, **k: True))(*a, **k)
+
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", dispatch)
+    data = {"project_name": "p", "pipeline": "cinematic", "options": {"budget_cny": 10}}
+    runner.create("j", data)
+
+    async def approver():
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if runner.get("j")["status"] == "awaiting_approval":
+                runner.set_approval("j", "approve", "")
+                return
+    approver_task = asyncio.create_task(approver())
+
+    await stage_runner.run_pipeline_job("j", data)
+    await approver_task
+
+    assert runner.get("j")["status"] == "completed"
+    # First call saw the original ceiling (10); the retry after approval saw
+    # a re-armed ceiling that's enough to admit the ¥50 call — NOT 0 (which
+    # round(spent * 1.2, 4) alone would have produced) and not below 10.
+    assert seen_budget[0] == 10
+    assert seen_budget[1] >= 50
+    assert seen_budget[1] > seen_budget[0]
+
+
+async def test_budget_gate_awaiting_approval_names_the_blocked_call(runner, monkeypatch, tmp_path):
+    # Regression: force=True firing purely from a pre-call block (spent may
+    # still be <= budget_cny) made over_by_cny come out negative — the UI
+    # showed "under budget" while asking approval for an apparent overspend,
+    # with no visibility into what triggered it. The blocked tool_name/
+    # est_cost must be surfaced explicitly.
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
+
+    budget_exc = stage_runner.BudgetExceededError(
+        "over budget", tool_name="maas_video", est_cost=50.0, projected_cny=50.0,
+    )
+
+    def flaky_research(*a, **k):
+        resume_messages = a[12]
+        if resume_messages is None:
+            raise stage_runner.BudgetGateNeeded(
+                messages=[{"role": "user", "content": "orig"}],
+                preview_text="blocked", budget_exc=budget_exc,
+            )
+        return True
+
+    def dispatch(*a, **k):
+        stage_name = a[1]
+        return (flaky_research if stage_name == "research" else (lambda *a, **k: True))(*a, **k)
+
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", dispatch)
+    data = {"project_name": "p", "pipeline": "cinematic", "options": {"budget_cny": 10}}
+    runner.create("j", data)
+
+    async def approver():
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if runner.get("j")["status"] == "awaiting_approval":
+                runner.set_approval("j", "approve", "")
+                return
+    approver_task = asyncio.create_task(approver())
+
+    await stage_runner.run_pipeline_job("j", data)
+    await approver_task
+
+    evs = runner.get_events("j", after_seq=-1)
+    gate_event = next(e for e in evs if e["type"] == "awaiting_approval" and e.get("gate") == "budget")
+    assert gate_event["preview"]["blocked_tool_name"] == "maas_video"
+    assert gate_event["preview"]["blocked_est_cost_cny"] == 50.0
+    budget_exceeded_event = next(e for e in evs if e["type"] == "budget_exceeded" and "blocked_tool_name" in e)
+    assert budget_exceeded_event["blocked_tool_name"] == "maas_video"
+
+
+# ── BudgetGateNeeded: resume the SAME conversation, not a fresh one ─────────
+
+async def test_budget_gate_needed_pauses_then_resumes_same_conversation(runner, monkeypatch, tmp_path):
+    # Regression: a pre-call budget block used to unwind the whole stage as a
+    # bare BudgetExceededError with no `messages` — approval then restarted
+    # the stage conversation from scratch, orphaning any assets already
+    # generated earlier in that SAME stage's conversation. It must now pause
+    # for a real approval and resume with the SAME conversation, and the
+    # resumed message list must be valid enough for a real OpenAI-shaped API
+    # to accept: every tool_call_id in the paused assistant turn (including
+    # ones never reached because a sibling call blocked first) must have a
+    # matching tool-role response.
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
+
+    paused_messages = [
+        {"role": "user", "content": "original prompt"},
+        {"role": "assistant", "content": "generating", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "run_openmontage_tool", "arguments": "{}"}},
+            {"id": "c2", "type": "function", "function": {"name": "run_openmontage_tool", "arguments": "{}"}},
+            {"id": "c3", "type": "function", "function": {"name": "run_openmontage_tool", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": '{"success": true}'},   # already ran
+        {"role": "tool", "tool_call_id": "c2", "content": "BLOCKED: awaiting budget approval"},
+        {"role": "tool", "tool_call_id": "c3", "content": "SKIPPED: stage paused for budget approval"},
+    ]
+    budget_exc = stage_runner.BudgetExceededError(
+        "over budget", tool_name="maas_video", est_cost=50.0, projected_cny=60.0,
+    )
+    resumed_with = []
+
+    def flaky_research(*a, **k):
+        resume_messages = a[12]
+        if resume_messages is None:
+            raise stage_runner.BudgetGateNeeded(
+                messages=paused_messages, preview_text="blocked", budget_exc=budget_exc,
+            )
+        resumed_with.append(resume_messages)
+        return True
+
+    def dispatch(*a, **k):
+        stage_name = a[1]
+        return (flaky_research if stage_name == "research" else (lambda *a, **k: True))(*a, **k)
+
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", dispatch)
+    data = {"project_name": "p", "pipeline": "cinematic", "options": {"budget_cny": 1}}
+    runner.create("j", data)
+
+    async def approver():
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if runner.get("j")["status"] == "awaiting_approval":
+                runner.set_approval("j", "approve", "")
+                return
+    approver_task = asyncio.create_task(approver())
+
+    await stage_runner.run_pipeline_job("j", data)
+    await approver_task
+
+    assert runner.get("j")["status"] == "completed"
+    assert resumed_with
+    resumed = resumed_with[0]
+    # Prior turns intact — not restarted from scratch.
+    assert resumed[:5] == paused_messages
+    assert resumed[-1]["role"] == "user"
+    assert "approved" in resumed[-1]["content"].lower()
+
+    # Every tool_call in the assistant turn has a matching tool-role response
+    # — a real OpenAI-shaped API would reject the request otherwise.
+    assistant_turn = next(m for m in resumed if m.get("role") == "assistant" and m.get("tool_calls"))
+    tool_call_ids = {tc["id"] for tc in assistant_turn["tool_calls"]}
+    tool_response_ids = {m["tool_call_id"] for m in resumed if m.get("role") == "tool"}
+    assert tool_call_ids <= tool_response_ids
+
+
+# ── publish anti-fabrication (generalized render/export-file check) ─────────
+
+def _publish_log_with_export(export_path: str) -> dict:
+    return {
+        "version": "1.0",
+        "entries": [{
+            "platform": "youtube",
+            "status": "exported",
+            "export_path": export_path,
+            "timestamp": "2026-01-01T00:00:00Z",
+        }],
+    }
+
+
+async def test_publish_stage_fails_on_fabricated_publish_log(runner, monkeypatch, tmp_path):
+    # Confirmed live: a publish_log artifact claimed 5 real export files
+    # (teaser cut, platform-specific crops, poster frame) that were never
+    # generated — no exports/ directory ever created, zero video-processing
+    # tool calls in that stage's trace. Claiming status="exported" with an
+    # export_path must not be enough — a real file must back it up.
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
+
+    def write_fabricated_publish_log(job_id, stage_name, skill_text, project_dir, *a, **k):
+        (project_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+        if stage_name == "compose":
+            (project_dir / "artifacts" / "render_report.json").write_text("{}")
+        if stage_name == "publish":
+            (project_dir / "artifacts" / "publish_log.json").write_text(
+                json.dumps(_publish_log_with_export("exports/teaser.mp4"))
+            )
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", write_fabricated_publish_log)
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic", [
+        {"name": "compose", "skill": None, "approval": False, "produces": ["render_report"]},
+        {"name": "publish", "skill": None, "approval": False, "produces": ["publish_log"]},
+    ])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    job = runner.get("j")
+    assert job["status"] == "failed"
+    assert "publish" not in job["completed_stages"]
+    failed = [e for e in runner.get_events("j", after_seq=-1) if e["type"] == "job_failed"]
+    assert failed and "exports/teaser.mp4" in failed[-1]["message"]
+
+
+async def test_publish_stage_passes_with_genuine_exports(runner, monkeypatch, tmp_path):
+    # The mirror-image case: real files on disk at the claimed export_path
+    # must NOT be flagged.
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
+
+    def write_genuine_publish_log(job_id, stage_name, skill_text, project_dir, *a, **k):
+        (project_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+        if stage_name == "compose":
+            (project_dir / "artifacts" / "render_report.json").write_text("{}")
+        if stage_name == "publish":
+            (project_dir / "exports").mkdir(parents=True, exist_ok=True)
+            (project_dir / "exports" / "teaser.mp4").write_bytes(b"real bytes")
+            (project_dir / "artifacts" / "publish_log.json").write_text(
+                json.dumps(_publish_log_with_export("exports/teaser.mp4"))
+            )
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", write_genuine_publish_log)
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic", [
+        {"name": "compose", "skill": None, "approval": False, "produces": ["render_report"]},
+        {"name": "publish", "skill": None, "approval": False, "produces": ["publish_log"]},
+    ])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    assert runner.get("j")["status"] == "completed"
+
+
+# ── edit-stage render_runtime consistency (Fix 8) ───────────────────────────
+
+async def test_edit_stage_fails_on_silent_render_runtime_divergence(runner, monkeypatch, tmp_path):
+    # Confirmed live: proposal locked a render_runtime with an explicit
+    # decision_log entry demanding no silent fallback to FFmpeg, yet
+    # edit_decisions silently switched render_runtime to 'ffmpeg' with no new
+    # decision_log entry and no escalation — the edit stage has no human
+    # approval gate to catch this on its own.
+    def write_diverging_edit_decisions(job_id, stage_name, skill_text, project_dir, *a, **k):
+        (project_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+        if stage_name == "proposal":
+            (project_dir / "artifacts" / "proposal_packet.json").write_text(json.dumps(
+                {"production_plan": {"render_runtime": "remotion"}}
+            ))
+        if stage_name == "edit":
+            (project_dir / "artifacts" / "edit_decisions.json").write_text(json.dumps(
+                {"render_runtime": "ffmpeg"}
+            ))
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", write_diverging_edit_decisions)
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic", [
+        {"name": "proposal", "skill": None, "approval": False, "produces": ["proposal_packet"]},
+        {"name": "edit", "skill": None, "approval": False, "produces": ["edit_decisions"]},
+    ])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    job = runner.get("j")
+    assert job["status"] == "failed"
+    assert "edit" not in job["completed_stages"]
+    failed = [e for e in runner.get_events("j", after_seq=-1) if e["type"] == "job_failed"]
+    assert failed and "remotion" in failed[-1]["message"] and "ffmpeg" in failed[-1]["message"]
+
+
+async def test_edit_stage_passes_when_divergence_is_justified_by_decision_log(runner, monkeypatch, tmp_path):
+    def write_justified_edit_decisions(job_id, stage_name, skill_text, project_dir, *a, **k):
+        (project_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+        if stage_name == "proposal":
+            (project_dir / "artifacts" / "proposal_packet.json").write_text(json.dumps(
+                {"production_plan": {"render_runtime": "remotion"}}
+            ))
+        if stage_name == "edit":
+            (project_dir / "artifacts" / "edit_decisions.json").write_text(json.dumps(
+                {"render_runtime": "ffmpeg"}
+            ))
+            (project_dir / "artifacts" / "decision_log.json").write_text(json.dumps({
+                "decisions": [{
+                    "decision_id": "d-002", "stage": "edit", "category": "render_runtime_selection",
+                    "subject": "runtime override", "options_considered": [
+                        {"option_id": "o1", "label": "ffmpeg", "score": 1, "reason": "remotion unavailable"},
+                    ],
+                    "selected": "o1", "reason": "remotion render failed at edit time",
+                }],
+            }))
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", write_justified_edit_decisions)
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic", [
+        {"name": "proposal", "skill": None, "approval": False, "produces": ["proposal_packet"]},
+        {"name": "edit", "skill": None, "approval": False, "produces": ["edit_decisions"]},
+    ])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    assert runner.get("j")["status"] == "completed"
+
+
+# ── cancellation: cancel_requested must win over every gate's own reject
+# semantics (abort/try-again/regenerate all mean something different — a
+# cancel must short-circuit all of them, not get reinterpreted as one) ──────
+
+async def test_cancel_requested_before_any_stage_never_runs_one(runner, monkeypatch):
+    # The "queued" case: cancelled before the job was even dequeued. The
+    # per-stage loop's cancel check must fire on the very first iteration,
+    # before any stage — including a non-approval-gated one — actually runs.
+    ran = []
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", lambda *a, **k: ran.append(1) or True)
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+    runner.update("j", cancel_requested=True)
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    assert runner.get("j")["status"] == "cancelled"
+    assert ran == []
+    assert any(e["type"] == "job_cancelled" for e in runner.get_events("j", after_seq=-1))
+
+
+async def test_cancel_overrides_budget_gate_reject_semantics(runner, monkeypatch):
+    # Budget-gate reject already means "abort" — but it must abort as
+    # "cancelled", not "failed", when the rejection was actually a cancel
+    # (the cancel endpoint sets cancel_requested=True and calls
+    # set_approval(..., "reject", ...) verbatim, since a plain reject is the
+    # only way to unblock wait_for_approval from outside the runner).
+    def spend(*a, **k):
+        acc = a[7]
+        if acc is not None:
+            acc.append(5.0)
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", spend)
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic", "options": {"budget_cny": 1}})
+
+    async def canceller():
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if runner.get("j")["status"] == "awaiting_approval":
+                runner.update("j", cancel_requested=True)
+                runner.set_approval("j", "reject", "Cancelled by user")
+                return
+    canceller_task = asyncio.create_task(canceller())
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic",
+                                              "options": {"budget_cny": 1}})
+    await canceller_task
+
+    assert runner.get("j")["status"] == "cancelled"
+    assert any(e["type"] == "job_cancelled" for e in runner.get_events("j", after_seq=-1))
+
+
+async def test_cancel_overrides_sample_preview_gate_reject_semantics(runner, monkeypatch, tmp_path):
+    # The sample-preview gate's OWN reject semantics mean "try a different
+    # approach and keep going" (see _sample_preview_gate) — the exact
+    # opposite of stopping. Without checking cancel_requested first, routing
+    # a cancel through set_approval(..., "reject", ...) here would just make
+    # the agent try again instead of actually cancelling the job.
+    (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
+    (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
+
+    def flaky_research(*a, **k):
+        resume_messages = a[12]
+        if resume_messages is None:
+            raise stage_runner.SamplePreviewNeeded(
+                messages=[{"role": "user", "content": "orig"}], preview_text="sample",
+                sample_iteration=0,
+            )
+        return True   # would only be reached if the reject were misinterpreted as "resume"
+
+    def dispatch(*a, **k):
+        stage_name = a[1]
+        return (flaky_research if stage_name == "research" else (lambda *a, **k: True))(*a, **k)
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", dispatch)
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    async def canceller():
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if runner.get("j")["status"] == "awaiting_approval":
+                runner.update("j", cancel_requested=True)
+                runner.set_approval("j", "reject", "Cancelled by user")
+                return
+    canceller_task = asyncio.create_task(canceller())
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+    await canceller_task
+
+    assert runner.get("j")["status"] == "cancelled"
+    assert any(e["type"] == "job_cancelled" for e in runner.get_events("j", after_seq=-1))
+
+
+async def test_cancel_overrides_stage_boundary_gate_reject_semantics(runner, monkeypatch):
+    # The ordinary stage-boundary approval gate's OWN reject semantics mean
+    # "regenerate with feedback, keep looping until approved" — also the
+    # opposite of stopping. A cancel routed through the same reject action
+    # must not fall into that regenerate loop.
+    regenerate_calls = []
+    def stub(*a, **k):
+        regenerate_calls.append(1)
+        project_dir = a[3]
+        (project_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+        (project_dir / "artifacts" / "script.json").write_text("{}")
+        return True
+    monkeypatch.setattr(stage_runner, "_run_agent_stage", stub)
+    monkeypatch.setitem(stage_runner.PIPELINE_MAP, "cinematic",
+                        [{"name": "script", "skill": None, "approval": True, "produces": ["script"]}])
+    runner.create("j", {"project_name": "p", "pipeline": "cinematic"})
+
+    async def canceller():
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if runner.get("j")["status"] == "awaiting_approval":
+                runner.update("j", cancel_requested=True)
+                runner.set_approval("j", "reject", "Cancelled by user")
+                return
+    canceller_task = asyncio.create_task(canceller())
+
+    await stage_runner.run_pipeline_job("j", {"project_name": "p", "pipeline": "cinematic"})
+    await canceller_task
+
+    assert runner.get("j")["status"] == "cancelled"
+    assert regenerate_calls == [1]   # only the initial run — no regenerate round was triggered
+    assert any(e["type"] == "job_cancelled" for e in runner.get_events("j", after_seq=-1))
