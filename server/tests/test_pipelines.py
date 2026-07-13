@@ -5,17 +5,18 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app import main
-from app.runner.stage_runner import _resolve_stages, CINEMATIC_STAGES, PIPELINE_MAP
+from app.runner.stage_runner import _resolve_stages, PIPELINE_MAP
 
 
 client = TestClient(main.app)
 
 
 def test_override_wins_over_manifest():
-    # cinematic/marketing_film are explicit overrides → the hardcoded stages
-    names = [s["name"] for s in _resolve_stages("cinematic")]
-    assert names == [s["name"] for s in CINEMATIC_STAGES]
-    assert _resolve_stages("marketing_film") is PIPELINE_MAP["marketing_film"]
+    # "marketing_film" is a PIPELINE_MAP alias (a string, not a hardcoded
+    # stage list) that re-resolves under "cinematic" — it must produce
+    # exactly the same stages cinematic itself resolves to.
+    assert PIPELINE_MAP["marketing_film"] == "cinematic"
+    assert _resolve_stages("marketing_film") == _resolve_stages("cinematic")
 
 
 def test_dynamic_manifest_load():
@@ -31,7 +32,7 @@ def test_dynamic_manifest_load():
 
 def test_unknown_pipeline_falls_back_to_cinematic():
     names = [s["name"] for s in _resolve_stages("no-such-pipeline-xyz")]
-    assert names == [s["name"] for s in CINEMATIC_STAGES]
+    assert names == [s["name"] for s in _resolve_stages("cinematic")]
 
 
 def test_pipelines_list_endpoint():
@@ -82,7 +83,7 @@ def test_broken_manifest_is_logged_not_silently_dropped(monkeypatch, caplog):
 
 def test_drifted_pipeline_resolves_own_stages():
     sd = [s["name"] for s in _resolve_stages("screen-demo")]
-    assert sd and sd != [s["name"] for s in CINEMATIC_STAGES]
+    assert sd and sd != [s["name"] for s in _resolve_stages("cinematic")]
 
 
 def test_stage_missing_name_degrades_gracefully_not_500(monkeypatch, caplog):
@@ -166,49 +167,51 @@ def test_traversal_via_detail_endpoint_returns_404():
     assert client.get("/pipelines/../config").status_code in (404, 307, 308)
 
 
-def test_cinematic_hardcoded_approval_matches_manifest():
-    # Regression: CINEMATIC_STAGES is a hand-maintained copy of
-    # pipeline_defs/cinematic.yaml's stage list — it drifted false for
-    # scene_plan/assets/publish while the manifest (and each stage's own
-    # "Gate Reminder (Binding)" skill text) required a checkpoint, silently
-    # skipping the asset-generation cost gate for every job run through the
-    # web platform's hardcoded-override path. Every stage's `approval` flag
-    # here must match the manifest's human_approval_default exactly.
+def test_cinematic_stages_derived_from_manifest_correctly():
+    # cinematic used to keep a second, hand-maintained copy of its stage list
+    # (CINEMATIC_STAGES) purely so these regression tests could catch it
+    # drifting out of sync with pipeline_defs/cinematic.yaml — it drifted
+    # false for scene_plan/assets/publish's human_approval_default while the
+    # manifest (and each stage's own "Gate Reminder (Binding)" skill text)
+    # required a checkpoint, silently skipping the asset-generation cost gate
+    # for every job run through the web platform. Now cinematic resolves
+    # through _resolve_stages(manifest) exactly like every other pipeline, so
+    # there is no second copy left to drift — this asserts the derivation
+    # itself produces the right shape:
+    #   - stage names/order match the manifest
+    #   - approval matches the manifest, cross-checked against
+    #     lib.pipeline_loader.get_stage_human_approval_default — the same
+    #     canonical reader lib/checkpoint.py and the Backlot board use — so a
+    #     future divergence between stage_runner's own parsing and that
+    #     canonical helper still gets caught
+    #   - produces / required_artifacts_in match the manifest
+    #   - skill paths are well-formed AND resolve to a real file on disk —
+    #     CINEMATIC_STAGES's hand-typed paths were never checked against the
+    #     filesystem, so a typo there could have gone unnoticed indefinitely
     from app.pipeline_catalog import load_manifest
     from lib.pipeline_loader import get_stage_human_approval_default
     manifest = load_manifest("cinematic")
-    for stage in CINEMATIC_STAGES:
-        expected = get_stage_human_approval_default(manifest, stage["name"])
-        assert stage["approval"] == expected, (
-            f"CINEMATIC_STAGES['{stage['name']}'].approval={stage['approval']} "
-            f"but pipeline_defs/cinematic.yaml declares human_approval_default={expected}"
-        )
-
-
-def test_cinematic_hardcoded_stage_shape_matches_manifest():
-    # Companion to test_cinematic_hardcoded_approval_matches_manifest above,
-    # which only guards the `approval` flag. CINEMATIC_STAGES is still a
-    # hand-maintained copy of pipeline_defs/cinematic.yaml's stage list, so
-    # names/order, `produces`, and `required_artifacts_in` can drift the same
-    # way the approval flags did. Assert those stay in sync too.
-    from app.pipeline_catalog import load_manifest
-    manifest = load_manifest("cinematic")
     manifest_stages = {s["name"]: s for s in manifest["stages"]}
+    stages = _resolve_stages("cinematic")
 
-    assert [s["name"] for s in CINEMATIC_STAGES] == list(manifest_stages), (
-        "CINEMATIC_STAGES stage names/order drifted from pipeline_defs/cinematic.yaml"
-    )
-    for stage in CINEMATIC_STAGES:
+    assert [s["name"] for s in stages] == list(manifest_stages)
+
+    for stage in stages:
         manifest_stage = manifest_stages[stage["name"]]
-        assert stage["produces"] == (manifest_stage.get("produces") or []), (
-            f"CINEMATIC_STAGES['{stage['name']}'].produces={stage['produces']} "
-            f"but pipeline_defs/cinematic.yaml declares produces={manifest_stage.get('produces')}"
+        expected_approval = get_stage_human_approval_default(manifest, stage["name"])
+        assert stage["approval"] == expected_approval, (
+            f"_resolve_stages('cinematic')['{stage['name']}'].approval={stage['approval']} "
+            f"but get_stage_human_approval_default reports {expected_approval}"
         )
-        assert stage["required_artifacts_in"] == (manifest_stage.get("required_artifacts_in") or []), (
-            f"CINEMATIC_STAGES['{stage['name']}'].required_artifacts_in={stage['required_artifacts_in']} "
-            f"but pipeline_defs/cinematic.yaml declares "
-            f"required_artifacts_in={manifest_stage.get('required_artifacts_in')}"
-        )
+        assert stage["produces"] == (manifest_stage.get("produces") or [])
+        assert stage["required_artifacts_in"] == (manifest_stage.get("required_artifacts_in") or [])
+        if stage["skill"] is not None:
+            assert stage["skill"].startswith("skills/") and stage["skill"].endswith(".md")
+            from app.runner.stage_runner import OM_ROOT
+            assert (OM_ROOT / stage["skill"]).exists(), (
+                f"stage {stage['name']!r} resolves to skill path {stage['skill']!r}, "
+                "which doesn't exist on disk"
+            )
 
 
 def test_load_manifest_never_returns_none(tmp_path, monkeypatch):
