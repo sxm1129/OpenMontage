@@ -132,11 +132,43 @@ export default function BrandsPage() {
           body: JSON.stringify(payload),
         });
       } else {
-        await fetch(`${SERVER}/brands`, {
+        const createRes = await fetch(`${SERVER}/brands`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
+        if (createRes.ok && refImageFile) {
+          // Immediately follow up with the reference-image upload so the
+          // whole thing reads as one atomic "create brand kit with
+          // reference image" action to the user, instead of two separate
+          // steps they'd otherwise have to discover (create, then re-open
+          // to attach an image).
+          const newKit: BrandKit = await createRes.json();
+          const uploadBody = new FormData();
+          uploadBody.append("file", refImageFile);
+          let uploadOk = false;
+          try {
+            const uploadRes = await fetch(`${SERVER}/brands/${newKit.kit_id}/reference-image`, {
+              method: "POST",
+              body: uploadBody,
+            });
+            uploadOk = uploadRes.ok;
+          } catch {
+            uploadOk = false;
+          }
+          if (!uploadOk) {
+            // The kit itself was created successfully — don't roll that
+            // back or silently swallow the follow-up failure. Drop into
+            // edit mode for the new kit so the error stays visible and a
+            // retry (via the now-available upload button, or a plain
+            // re-save) acts on the existing kit instead of creating a
+            // duplicate.
+            setSaveError("品牌 Kit 已创建，但参考图上传失败，请重试上传");
+            setEditing(newKit);
+            await load();
+            return;
+          }
+        }
       }
       await load();
       setCreating(false);
@@ -217,25 +249,31 @@ export default function BrandsPage() {
                 <label className="text-sm font-medium block mb-1.5">风格备注</label>
                 <Textarea rows={2} value={form.style_notes} onChange={(e) => setForm(f => ({ ...f, style_notes: e.target.value }))} placeholder="慢镜头、暖调、微距特写、无旁白…" />
               </div>
-              {editing && (
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">参考图</label>
-                  <div className="flex items-center gap-3">
-                    {refImagePreview && (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={refImageVersion > 0 ? `${refImagePreview}?t=${refImageVersion}` : refImagePreview}
-                        alt="参考图预览"
-                        className="w-24 h-24 object-cover rounded border border-border"
-                      />
-                    )}
-                    <div className="flex flex-col gap-2 items-start">
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={(e) => setRefImageFile(e.target.files?.[0] ?? null)}
-                        className="text-xs"
-                      />
+              {/* Rendered in both create and edit mode now — the upload
+                endpoint needs an existing kit_id, so in create mode the
+                manual "上传参考图" button (which calls
+                handleUploadReferenceImage, requiring `editing`) is swapped
+                for a hint that the file will be attached automatically once
+                the kit is saved; see the create branch of handleSave. */}
+              <div>
+                <label className="text-sm font-medium block mb-1.5">参考图</label>
+                <div className="flex items-center gap-3">
+                  {refImagePreview && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={refImageVersion > 0 ? `${refImagePreview}?t=${refImageVersion}` : refImagePreview}
+                      alt="参考图预览"
+                      className="w-24 h-24 object-cover rounded border border-border"
+                    />
+                  )}
+                  <div className="flex flex-col gap-2 items-start">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setRefImageFile(e.target.files?.[0] ?? null)}
+                      className="text-xs"
+                    />
+                    {editing ? (
                       <Button
                         type="button"
                         size="sm"
@@ -245,11 +283,15 @@ export default function BrandsPage() {
                       >
                         {uploadingRefImage ? "上传中…" : "上传参考图"}
                       </Button>
-                      {refImageError && <p className="text-xs text-destructive">{refImageError}</p>}
-                    </div>
+                    ) : (
+                      refImageFile && (
+                        <p className="text-xs text-muted-foreground">将在保存品牌 Kit 时自动上传</p>
+                      )
+                    )}
+                    {refImageError && <p className="text-xs text-destructive">{refImageError}</p>}
                   </div>
                 </div>
-              )}
+              </div>
               {saveError && <p className="text-xs text-destructive">{saveError}</p>}
               <div className="flex gap-3 pt-2">
                 <Button type="submit" disabled={saving}>{saving ? "保存中…" : "保存"}</Button>
