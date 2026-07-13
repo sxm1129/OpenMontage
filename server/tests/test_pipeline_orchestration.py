@@ -323,7 +323,7 @@ async def test_reject_retry_still_receives_budget_ceiling(runner, monkeypatch):
     # reject-path call receives the same non-None ceiling as the initial run.
     seen_budget = []
     def stub(*a, **k):
-        seen_budget.append(a[9])   # budget_cny positional arg
+        seen_budget.append(k["budget_cny"])   # keyword-only arg
         # Simulate a real stage: write the declared produces artifact so the
         # post-success "did this stage actually produce anything" check passes.
         project_dir = a[3]
@@ -368,7 +368,7 @@ async def test_budget_gate_pauses_then_resumes_on_approve(runner, monkeypatch, t
     (tmp_path / "projects" / "p" / "renders").mkdir(parents=True)
     (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
     def spend(*a, **k):
-        acc = a[7]              # cost_accumulator positional arg
+        acc = k["cost_accumulator"]   # keyword-only arg
         if acc is not None:
             acc.append(5.0)
         return True
@@ -399,7 +399,7 @@ async def test_budget_gate_pauses_then_resumes_on_approve(runner, monkeypatch, t
 
 async def test_budget_gate_aborts_on_reject(runner, monkeypatch):
     def spend(*a, **k):
-        acc = a[7]
+        acc = k["cost_accumulator"]
         if acc is not None:
             acc.append(5.0)
         return True
@@ -436,7 +436,7 @@ async def test_sample_preview_gate_pauses_then_resumes_same_conversation(runner,
     resumed_with = []
 
     def flaky_research(*a, **k):
-        resume_messages = a[12]
+        resume_messages = k["resume_messages"]
         if resume_messages is None:
             raise stage_runner.SamplePreviewNeeded(
                 messages=paused_messages, preview_text="here's a sample, please confirm",
@@ -487,7 +487,7 @@ async def test_sample_preview_gate_reject_carries_feedback_into_resume(runner, m
     resumed_with = []
 
     def flaky_research(*a, **k):
-        resume_messages = a[12]
+        resume_messages = k["resume_messages"]
         if resume_messages is None:
             raise stage_runner.SamplePreviewNeeded(
                 messages=[{"role": "user", "content": "orig"}], preview_text="sample",
@@ -531,7 +531,7 @@ async def test_automatic_retry_folds_last_failure_into_feedback(runner, monkeypa
     feedback_seen = []
 
     def flaky_research(*a, **k):
-        feedback = a[6]
+        feedback = k["feedback"]
         feedback_seen.append(feedback)
         if len(feedback_seen) == 1:
             stage_runner._emit(a[0], {"type": "error", "stage": a[1], "message": "malformed tool call: xyz"})
@@ -710,8 +710,8 @@ async def test_budget_gate_rearms_at_higher_ceiling_instead_of_disabling(runner,
     seen_budget = []
 
     def spend(*a, **k):
-        seen_budget.append(a[9])   # budget_cny positional arg, as of THIS stage's start
-        acc = a[7]                 # cost_accumulator positional arg
+        seen_budget.append(k["budget_cny"])   # keyword-only arg, as of THIS stage's start
+        acc = k["cost_accumulator"]           # keyword-only arg
         if acc is not None:
             acc.append(5.0)        # every stage "spends" another 5 CNY
         return True
@@ -770,8 +770,8 @@ async def test_budget_gate_rearm_uses_projected_cost_not_just_spent(runner, monk
     seen_budget = []
 
     def flaky_research(*a, **k):
-        seen_budget.append(a[9])   # budget_cny positional arg
-        resume_messages = a[12]
+        seen_budget.append(k["budget_cny"])   # keyword-only arg
+        resume_messages = k["resume_messages"]
         if resume_messages is None:
             raise stage_runner.BudgetGateNeeded(
                 messages=[{"role": "user", "content": "orig"}],
@@ -821,7 +821,7 @@ async def test_budget_gate_awaiting_approval_names_the_blocked_call(runner, monk
     )
 
     def flaky_research(*a, **k):
-        resume_messages = a[12]
+        resume_messages = k["resume_messages"]
         if resume_messages is None:
             raise stage_runner.BudgetGateNeeded(
                 messages=[{"role": "user", "content": "orig"}],
@@ -888,7 +888,7 @@ async def test_budget_gate_needed_pauses_then_resumes_same_conversation(runner, 
     resumed_with = []
 
     def flaky_research(*a, **k):
-        resume_messages = a[12]
+        resume_messages = k["resume_messages"]
         if resume_messages is None:
             raise stage_runner.BudgetGateNeeded(
                 messages=paused_messages, preview_text="blocked", budget_exc=budget_exc,
@@ -1103,7 +1103,7 @@ async def test_cancel_overrides_budget_gate_reject_semantics(runner, monkeypatch
     # set_approval(..., "reject", ...) verbatim, since a plain reject is the
     # only way to unblock wait_for_approval from outside the runner).
     def spend(*a, **k):
-        acc = a[7]
+        acc = k["cost_accumulator"]
         if acc is not None:
             acc.append(5.0)
         return True
@@ -1137,7 +1137,7 @@ async def test_cancel_overrides_sample_preview_gate_reject_semantics(runner, mon
     (tmp_path / "projects" / "p" / "renders" / "final.mp4").write_bytes(b"x")
 
     def flaky_research(*a, **k):
-        resume_messages = a[12]
+        resume_messages = k["resume_messages"]
         if resume_messages is None:
             raise stage_runner.SamplePreviewNeeded(
                 messages=[{"role": "user", "content": "orig"}], preview_text="sample",

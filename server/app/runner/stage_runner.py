@@ -255,6 +255,63 @@ def _emit(job_id: str, event: dict) -> None:
     job_store.push_event(job_id, {"ts": time.time(), **event})
 
 
+def _fail_job(
+    job_id: str,
+    stage: str | None = None,
+    message: str | None = None,
+    *,
+    set_current_stage: bool = True,
+    **extra_event_fields: Any,
+) -> None:
+    """Mark the job failed AND emit the matching job_failed event in one call.
+
+    The invariant "a status change must be accompanied by its matching event"
+    used to be maintained by hand at every failure site — one update() +
+    one _emit() pair each — which is exactly the kind of duplication where a
+    site eventually drifts (e.g. the retries-exhausted emit that shipped with
+    no message field at all). `stage`, when given, is stamped on the event
+    and (unless set_current_stage=False) recorded as the job's current_stage.
+    set_current_stage=False is for sites whose event `stage` names a gate
+    rather than a real pipeline stage (e.g. "budget") — clobbering the job
+    record's current_stage there would misreport where the pipeline actually
+    was. extra_event_fields (e.g. trace) pass through to the event verbatim.
+    """
+    update_kwargs: dict[str, Any] = {"status": "failed"}
+    if stage is not None and set_current_stage:
+        update_kwargs["current_stage"] = stage
+    job_store.update(job_id, **update_kwargs)
+    event: dict[str, Any] = {"type": "job_failed"}
+    if stage is not None:
+        event["stage"] = stage
+    if message is not None:
+        event["message"] = message
+    event.update(extra_event_fields)
+    _emit(job_id, event)
+
+
+def _pause_for_approval(
+    job_id: str,
+    stage: str,
+    gate: str | None = None,
+    preview: Any = None,
+) -> None:
+    """Set status=awaiting_approval AND emit the matching awaiting_approval
+    event in one call — same status-change-plus-event invariant as _fail_job.
+
+    `gate` distinguishes the mid-run gates (budget / sample_preview) from the
+    ordinary stage-boundary approval, which emits no gate key at all — the
+    key is omitted (not None) there so consumers' event shape is unchanged.
+    `preview` is always included, even when None, matching the historical
+    stage-boundary emit shape.
+    """
+    job_store.update(job_id, status="awaiting_approval")
+    event: dict[str, Any] = {"type": "awaiting_approval", "stage": stage}
+    if gate is not None:
+        event["gate"] = gate
+    event["preview"] = preview
+    _emit(job_id, event)
+
+
 def _truncate_json_for_prompt(text: str, cap: int) -> str:
     """Slice a JSON dump for prompt inclusion, with a visible marker when cut.
 
@@ -464,6 +521,7 @@ def _run_agent_stage(
     project_dir: Path,
     brand_info: dict,
     options: dict,
+    *,
     feedback: str = "",
     cost_accumulator: list | None = None,
     cost_tracker: Any = None,
@@ -477,6 +535,10 @@ def _run_agent_stage(
     required_artifacts_in: list[str] | None = None,
 ) -> bool:
     """Run a single stage. Returns True on success, False on failure.
+
+    Everything after `options` is keyword-only — the parameter list is long
+    enough that threading it positionally was an error magnet (callers and
+    test fakes had to count out a[6]/a[9]/a[12] to know what they received).
 
     resume_messages/sample_iteration resume a conversation that previously
     paused via SamplePreviewNeeded — when given, the stage's initial prompt
@@ -882,12 +944,11 @@ async def run_pipeline_job(job_id: str, data: dict) -> None:
         _emit(job_id, {"type": "job_cancelled"})
     except Exception as exc:  # noqa: BLE001 — deliberate catch-all backstop
         import traceback
-        job_store.update(job_id, status="failed")
-        _emit(job_id, {
-            "type": "job_failed",
-            "message": f"Unhandled pipeline error: {exc}",
-            "trace": traceback.format_exc()[-1500:],
-        })
+        _fail_job(
+            job_id,
+            message=f"Unhandled pipeline error: {exc}",
+            trace=traceback.format_exc()[-1500:],
+        )
     finally:
         _ACTIVE_JOB_IDS.discard(job_id)
 
@@ -967,7 +1028,6 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         blocked_tool_name = getattr(triggering_exc, "tool_name", None) if triggering_exc is not None else None
         blocked_est_cost = getattr(triggering_exc, "est_cost", None) if triggering_exc is not None else None
         projected_cny = getattr(triggering_exc, "projected_cny", None) if triggering_exc is not None else None
-        job_store.update(job_id, status="awaiting_approval")
         preview: dict[str, Any] = {
             "spent_cny": spent, "budget_cny": budget_cny,
             "over_by_cny": round(spent - budget_cny, 4),
@@ -989,20 +1049,20 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
             budget_exceeded_event["blocked_tool_name"] = blocked_tool_name
             budget_exceeded_event["blocked_est_cost_cny"] = blocked_est_cost
             budget_exceeded_event["projected_cny"] = projected_cny
-        _emit(job_id, {
-            "type": "awaiting_approval",
-            "stage": "budget",
-            "gate": "budget",
-            "preview": preview,
-        })
+        _pause_for_approval(job_id, "budget", gate="budget", preview=preview)
         _emit(job_id, budget_exceeded_event)
         approval = await job_store.wait_for_approval(job_id, timeout=3600.0)
         if (job_store.get(job_id) or {}).get("cancel_requested"):
             raise JobCancelled()
         if approval["action"] == "reject":
-            job_store.update(job_id, status="failed")
-            _emit(job_id, {"type": "job_failed", "stage": "budget",
-                           "message": f"Budget ¥{budget_cny} exceeded (spent ¥{spent}); aborted by user"})
+            # set_current_stage=False: "budget" names the gate in the event,
+            # not a pipeline stage — the job record's current_stage must keep
+            # pointing at the real stage that was running when the gate fired.
+            _fail_job(
+                job_id, stage="budget",
+                message=f"Budget ¥{budget_cny} exceeded (spent ¥{spent}); aborted by user",
+                set_current_stage=False,
+            )
             return False
         # Re-arm at a new, higher ceiling instead of permanently disabling
         # budget protection for the rest of the job (the previous
@@ -1053,16 +1113,10 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         as the stage-boundary and budget gates — this is a genuine pause,
         the SAME conversation resumes afterward, not a fresh one.
         """
-        job_store.update(job_id, status="awaiting_approval")
-        _emit(job_id, {
-            "type": "awaiting_approval",
-            "stage": stage_name,
-            "gate": "sample_preview",
-            "preview": {
-                "text": spn.preview_text,
-                "iteration": spn.sample_iteration + 1,
-                "max_iterations": MAX_SAMPLE_ITERATIONS,
-            },
+        _pause_for_approval(job_id, stage_name, gate="sample_preview", preview={
+            "text": spn.preview_text,
+            "iteration": spn.sample_iteration + 1,
+            "max_iterations": MAX_SAMPLE_ITERATIONS,
         })
         approval = await job_store.wait_for_approval(job_id, timeout=3600.0)
         if (job_store.get(job_id) or {}).get("cancel_requested"):
@@ -1076,6 +1130,80 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
             _emit(job_id, {"type": "stage_approved", "stage": stage_name, "gate": "sample_preview"})
             resume_text = "Approved — proceed to complete the stage."
         return spn.messages + [{"role": "user", "content": resume_text}]
+
+    async def _call_stage(
+        stage_def: dict, stage_name: str, skill_text: str, feedback: str
+    ) -> bool | None:
+        """Run one _run_agent_stage attempt, owning the gate-handling loop
+        around it (previously duplicated verbatim at the initial-run and
+        reject-regenerate call sites). Returns the stage's genuine outcome
+        (True/False), or None when the user rejected at the budget gate —
+        the gate already marked the job failed; the caller just returns.
+
+        The stage runs in a thread pool (blocking sync LLM calls must not
+        block the event loop). A pre-call budget block raises BudgetGateNeeded
+        out of the thread — pause for the human decision, and on approval
+        re-run at the gate's newly re-armed (raised) ceiling, never with the
+        check fully disabled. A mid-stage SamplePreviewNeeded pauses the same
+        way but resumes the SAME conversation (resume_messages) rather than
+        re-running from scratch. Neither pause consumes one of the caller's
+        retry rounds — this helper loops internally on the resume cases and
+        returns only on a genuine outcome. Resume state (resume_messages/
+        sample_iteration) is local to a single call, so every fresh call
+        naturally starts a fresh conversation.
+        """
+        resume_messages: list[dict] | None = None
+        sample_iteration = 0
+        while True:
+            try:
+                # _run_agent_stage is deliberately looked up as a module
+                # global at call time (a bare name, never captured/aliased)
+                # so tests monkeypatching stage_runner._run_agent_stage keep
+                # intercepting this call.
+                return await asyncio.to_thread(
+                    _run_agent_stage,
+                    job_id, stage_name, skill_text, project_dir,
+                    brand_info, options,
+                    feedback=feedback,
+                    cost_accumulator=cost_accumulator,
+                    cost_tracker=cost_tracker,
+                    budget_cny=budget_cny,
+                    base_cost=base_cost,
+                    produces=stage_def.get("produces"),
+                    resume_messages=resume_messages,
+                    sample_iteration=sample_iteration,
+                    max_turns=stage_def.get("max_turns", MAX_TURNS),
+                    temperature=stage_def.get("temperature", 0.7),
+                    required_artifacts_in=stage_def.get("required_artifacts_in"),
+                )
+            except BudgetGateNeeded as bgn:
+                _sync_cost(stage_name)
+                if not await _budget_gate(force=True, triggering_exc=bgn.budget_exc):
+                    return None
+                # Resume the SAME conversation (not a fresh one) at the newly
+                # re-armed ceiling — restarting from scratch would orphan any
+                # assets already generated earlier in this stage's
+                # conversation (see BudgetGateNeeded's docstring).
+                resume_messages = bgn.messages + [{
+                    "role": "user",
+                    "content": f"Budget approved at new ceiling ¥{budget_cny} — retry the blocked call.",
+                }]
+                continue   # resume, doesn't consume a retry round
+            except BudgetExceededError:
+                # Defensive fallback that shouldn't normally trigger: a raw
+                # BudgetExceededError reaching here unwrapped (the normal
+                # tool-call path in _run_agent_stage always converts it to
+                # BudgetGateNeeded first, preserving `messages`) — fall back
+                # to the old restart-from-scratch behavior rather than crash.
+                _sync_cost(stage_name)
+                if not await _budget_gate(force=True):
+                    return None
+                continue   # approved overspend → re-run at the raised ceiling
+            except SamplePreviewNeeded as spn:
+                _sync_cost(stage_name)
+                resume_messages = await _sample_preview_gate(stage_name, spn)
+                sample_iteration = spn.sample_iteration + 1
+                continue   # resume the same conversation, doesn't consume a retry round
 
     job_store.update(job_id, status="running", project_dir=str(project_dir))
     _emit(job_id, {
@@ -1117,15 +1245,10 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
             have = set(_load_artifacts(project_dir))
             missing = [name for name in required if name not in have]
             if missing:
-                job_store.update(job_id, status="failed", current_stage=stage_name)
-                _emit(job_id, {
-                    "type": "job_failed",
-                    "stage": stage_name,
-                    "message": (
-                        f"Stage '{stage_name}' requires artifact(s) {missing} "
-                        f"which were not found in {project_dir / 'artifacts'}"
-                    ),
-                })
+                _fail_job(job_id, stage=stage_name, message=(
+                    f"Stage '{stage_name}' requires artifact(s) {missing} "
+                    f"which were not found in {project_dir / 'artifacts'}"
+                ))
                 return
 
         # Load director skill. Some manifest stages (e.g. sub_stages-only or
@@ -1139,103 +1262,54 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
             else f"# {stage_name} director\nExecute the {stage_name} stage."
         )
 
-        # Run stage in thread pool (blocking sync LLM calls must not block event loop).
-        # A pre-call budget block raises BudgetExceededError out of the thread —
-        # pause for the human decision, and on approval re-run the stage at the
-        # gate's newly re-armed (raised) ceiling, never with the check fully
-        # disabled. A mid-stage SamplePreviewNeeded pauses the same way but
-        # resumes the SAME conversation (resume_messages) rather than
-        # re-running from scratch — it doesn't consume a retry round.
+        # Each attempt goes through _call_stage (the shared gate-handling
+        # loop around asyncio.to_thread(_run_agent_stage, ...) — budget gate,
+        # sample-preview gate, and their resume state, none of which consume
+        # a retry round; see _call_stage's docstring). This outer loop owns
+        # only the bounded auto-retry bookkeeping (MAX_ROUNDS) for genuine
+        # failures.
         success = False
         feedback = ""
-        resume_messages: list[dict] | None = None
-        sample_iteration = 0
         _round = 0
         while _round <= MAX_ROUNDS:
-            try:
-                success = await asyncio.to_thread(
-                    _run_agent_stage,
-                    job_id, stage_name, skill_text, project_dir,
-                    brand_info, options, feedback, cost_accumulator, cost_tracker,
-                    budget_cny, base_cost,
-                    stage_def.get("produces"),
-                    resume_messages, sample_iteration,
-                    max_turns=stage_def.get("max_turns", MAX_TURNS),
-                    temperature=stage_def.get("temperature", 0.7),
-                    required_artifacts_in=stage_def.get("required_artifacts_in"),
-                )
-                resume_messages = None
-            except BudgetGateNeeded as bgn:
-                _sync_cost(stage_name)
-                if not await _budget_gate(force=True, triggering_exc=bgn.budget_exc):
-                    return
-                # Resume the SAME conversation (not a fresh one) at the newly
-                # re-armed ceiling — restarting from scratch would orphan any
-                # assets already generated earlier in this stage's
-                # conversation (see BudgetGateNeeded's docstring).
-                resume_messages = bgn.messages + [{
-                    "role": "user",
-                    "content": f"Budget approved at new ceiling ¥{budget_cny} — retry the blocked call.",
-                }]
-                continue   # resume, doesn't consume a retry round
-            except BudgetExceededError:
-                # Defensive fallback: a raw BudgetExceededError reaching here
-                # unwrapped (the normal tool-call path in _run_agent_stage
-                # always converts it to BudgetGateNeeded first, preserving
-                # `messages`) — fall back to the old restart-from-scratch
-                # behavior rather than crash.
-                _sync_cost(stage_name)
-                if not await _budget_gate(force=True):
-                    return
-                continue   # approved overspend → re-run this stage at the raised ceiling
-            except SamplePreviewNeeded as spn:
-                _sync_cost(stage_name)
-                resume_messages = await _sample_preview_gate(stage_name, spn)
-                sample_iteration = spn.sample_iteration + 1
-                continue   # resume the same conversation, doesn't consume a retry round
+            outcome = await _call_stage(stage_def, stage_name, skill_text, feedback)
+            if outcome is None:
+                return   # user rejected at the budget gate — job already marked failed
+            success = outcome
             _sync_cost(stage_name)
             if success:
                 break
             _emit(job_id, {"type": "stage_retry", "stage": stage_name, "round": _round + 1})
             _round += 1
-            sample_iteration = 0   # a genuine retry starts a fresh conversation
             # Fold the last failure into feedback so the retry's brand-new
             # conversation at least knows what went wrong last time, instead
             # of reproducing the identical outcome up to MAX_ROUNDS times.
+            # (A genuine retry starts a fresh conversation — _call_stage's
+            # resume state is per-call, so there's nothing to reset here.)
             last_error = _last_failure_message(job_id, stage_name)
             if last_error:
                 feedback = f"Your previous attempt at this stage failed: {last_error}"
 
         if not success:
-            job_store.update(job_id, status="failed", current_stage=stage_name)
             # Reuse the same "what actually went wrong" diagnostic the
             # missing-produces failure right below already includes — this
             # emit used to carry no message field at all, leaving operators
             # with nothing actionable for a max-turns/retries-exhausted
             # failure specifically.
-            _emit(job_id, {
-                "type": "job_failed",
-                "stage": stage_name,
-                "message": (
-                    _last_failure_message(job_id, stage_name)
-                    or f"Stage '{stage_name}' failed after exhausting its retries."
-                ),
-            })
+            _fail_job(job_id, stage=stage_name, message=(
+                _last_failure_message(job_id, stage_name)
+                or f"Stage '{stage_name}' failed after exhausting its retries."
+            ))
             return
 
         missing = _missing_produces(project_dir, stage_def)
         if missing is not None:
-            job_store.update(job_id, status="failed", current_stage=stage_name)
-            _emit(job_id, {
-                "type": "job_failed",
-                "stage": stage_name,
-                "message": (
-                    f"Stage '{stage_name}' finished without writing any of its required "
-                    f"artifact(s) {missing} — check the event log above; the agent may "
-                    f"have stopped to ask for a decision (e.g. a generation provider "
-                    f"failure) instead of completing. Retry will re-run this stage."
-                ),
-            })
+            _fail_job(job_id, stage=stage_name, message=(
+                f"Stage '{stage_name}' finished without writing any of its required "
+                f"artifact(s) {missing} — check the event log above; the agent may "
+                f"have stopped to ask for a decision (e.g. a generation provider "
+                f"failure) instead of completing. Retry will re-run this stage."
+            ))
             return
 
         # Nothing else validates that edit_decisions.render_runtime matches
@@ -1248,8 +1322,7 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         if stage_name == "edit":
             runtime_mismatch = _check_render_runtime_consistency(project_dir)
             if runtime_mismatch:
-                job_store.update(job_id, status="failed", current_stage=stage_name)
-                _emit(job_id, {"type": "job_failed", "stage": stage_name, "message": runtime_mismatch})
+                _fail_job(job_id, stage=stage_name, message=runtime_mismatch)
                 return
 
         # The compose stage's render_report/final_review artifacts existing
@@ -1265,17 +1338,12 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         if stage_name == "compose":
             _compose_render_path = _discover_render_path(project_dir)
             if _compose_render_path is None:
-                job_store.update(job_id, status="failed", current_stage=stage_name)
-                _emit(job_id, {
-                    "type": "job_failed",
-                    "stage": stage_name,
-                    "message": (
-                        "Stage 'compose' wrote render_report/final_review but no actual "
-                        f"render file exists under {project_dir / 'renders'} — the "
-                        "report's claimed output isn't backed by a real file. Retry will "
-                        "re-run this stage."
-                    ),
-                })
+                _fail_job(job_id, stage=stage_name, message=(
+                    "Stage 'compose' wrote render_report/final_review but no actual "
+                    f"render file exists under {project_dir / 'renders'} — the "
+                    "report's claimed output isn't backed by a real file. Retry will "
+                    "re-run this stage."
+                ))
                 return
             # render_report's own claims (output path here; runtime/counts
             # elsewhere) are never cross-validated against reality otherwise
@@ -1317,17 +1385,12 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
             _artifact_value = _load_artifacts(project_dir).get(_artifact_name) or {}
             _missing_exports = _validator(project_dir, _artifact_value)
             if _missing_exports:
-                job_store.update(job_id, status="failed", current_stage=stage_name)
-                _emit(job_id, {
-                    "type": "job_failed",
-                    "stage": stage_name,
-                    "message": (
-                        f"Stage '{stage_name}' wrote {_artifact_name} claiming export(s) "
-                        f"{_missing_exports}, but no file exists at that path under "
-                        f"{project_dir} — the artifact's claimed output isn't backed by a "
-                        "real file. Retry will re-run this stage."
-                    ),
-                })
+                _fail_job(job_id, stage=stage_name, message=(
+                    f"Stage '{stage_name}' wrote {_artifact_name} claiming export(s) "
+                    f"{_missing_exports}, but no file exists at that path under "
+                    f"{project_dir} — the artifact's claimed output isn't backed by a "
+                    "real file. Retry will re-run this stage."
+                ))
                 return
 
         # The check above only requires ANY render file to exist — in a
@@ -1341,19 +1404,14 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
         if stage_name == "compose":
             missing_variants = _missing_variants(project_dir, options)
             if missing_variants:
-                job_store.update(job_id, status="failed", current_stage=stage_name)
                 total_variants = len(options.get("video_model_variants") or [])
-                _emit(job_id, {
-                    "type": "job_failed",
-                    "stage": stage_name,
-                    "message": (
-                        f"Stage 'compose' is an A/B variants job ({total_variants} "
-                        f"declared), but {len(missing_variants)} variant(s) never "
-                        f"produced a render file: {missing_variants}. Refusing to mark "
-                        "a multi-variant compose stage complete with partial output. "
-                        "Retry will re-run this stage."
-                    ),
-                })
+                _fail_job(job_id, stage=stage_name, message=(
+                    f"Stage 'compose' is an A/B variants job ({total_variants} "
+                    f"declared), but {len(missing_variants)} variant(s) never "
+                    f"produced a render file: {missing_variants}. Refusing to mark "
+                    "a multi-variant compose stage complete with partial output. "
+                    "Retry will re-run this stage."
+                ))
                 return
 
         _emit(job_id, {"type": "stage_completed", "stage": stage_name})
@@ -1394,8 +1452,7 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                         return arts[name]
                 return None
 
-            job_store.update(job_id, status="awaiting_approval")
-            _emit(job_id, {"type": "awaiting_approval", "stage": stage_name, "preview": _preview()})
+            _pause_for_approval(job_id, stage_name, preview=_preview())
             approval = await job_store.wait_for_approval(job_id, timeout=3600.0)
             if (job_store.get(job_id) or {}).get("cancel_requested"):
                 raise JobCancelled()
@@ -1407,65 +1464,28 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                 # Snapshot before regenerating — see _artifact_mtimes' docstring
                 # for why file *presence* alone can't detect a no-op round.
                 mtimes_before = _artifact_mtimes(project_dir, stage_def.get("produces") or [])
-                # Re-run with feedback in a thread (never block the loop) and keep
-                # accumulating cost. Same budget gate + produces hint as the
-                # first run — previously this call dropped budget_cny/base_cost
-                # entirely, letting a reject-regenerate loop bypass the
-                # pre-call budget ceiling.
-                resume_messages = None
-                sample_iteration = 0
-                while True:
-                    try:
-                        success = await asyncio.to_thread(
-                            _run_agent_stage,
-                            job_id, stage_name, skill_text, project_dir,
-                            brand_info, options, feedback, cost_accumulator, cost_tracker,
-                            budget_cny, base_cost,
-                            stage_def.get("produces"),
-                            resume_messages, sample_iteration,
-                            max_turns=stage_def.get("max_turns", MAX_TURNS),
-                            temperature=stage_def.get("temperature", 0.7),
-                            required_artifacts_in=stage_def.get("required_artifacts_in"),
-                        )
-                        resume_messages = None
-                        break
-                    except BudgetGateNeeded as bgn:
-                        _sync_cost(stage_name)
-                        if not await _budget_gate(force=True, triggering_exc=bgn.budget_exc):
-                            return
-                        # Resume the SAME conversation at the raised ceiling —
-                        # see BudgetGateNeeded's docstring.
-                        resume_messages = bgn.messages + [{
-                            "role": "user",
-                            "content": f"Budget approved at new ceiling ¥{budget_cny} — retry the blocked call.",
-                        }]
-                        continue   # resume, doesn't consume a retry round
-                    except BudgetExceededError:
-                        # Defensive fallback — see the initial-run loop above
-                        # for why this shouldn't normally trigger.
-                        _sync_cost(stage_name)
-                        if not await _budget_gate(force=True):
-                            return
-                        continue   # approved overspend → re-present the same approval round
-                    except SamplePreviewNeeded as spn:
-                        _sync_cost(stage_name)
-                        resume_messages = await _sample_preview_gate(stage_name, spn)
-                        sample_iteration = spn.sample_iteration + 1
-                        continue   # resume the same conversation
+                # Re-run with feedback through the same shared gate-handling
+                # loop as the initial run (never block the event loop) and
+                # keep accumulating cost. Same budget gate + produces hint as
+                # the first run — previously this call dropped budget_cny/
+                # base_cost entirely, letting a reject-regenerate loop bypass
+                # the pre-call budget ceiling.
+                outcome = await _call_stage(stage_def, stage_name, skill_text, feedback)
+                if outcome is None:
+                    return   # user rejected at the budget gate — job already marked failed
+                success = outcome
                 _sync_cost(stage_name)
                 if not success:
-                    job_store.update(job_id, status="failed")
                     # Same gap as the initial-run failure path above: reuse
                     # the last recorded error as an actionable diagnostic
                     # instead of an emit with no message field.
-                    _emit(job_id, {
-                        "type": "job_failed",
-                        "stage": stage_name,
-                        "message": (
-                            _last_failure_message(job_id, stage_name)
-                            or f"Stage '{stage_name}' failed after exhausting its retries."
-                        ),
-                    })
+                    # set_current_stage=False only to keep the update payload
+                    # identical to what this site always sent — current_stage
+                    # was already set to this stage when it started.
+                    _fail_job(job_id, stage=stage_name, message=(
+                        _last_failure_message(job_id, stage_name)
+                        or f"Stage '{stage_name}' failed after exhausting its retries."
+                    ), set_current_stage=False)
                     return
                 # A regenerate round can go the same way the very first run
                 # can (line ~857 above): the agent's turn loop can end
@@ -1483,21 +1503,15 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                 mtimes_after = _artifact_mtimes(project_dir, stage_def.get("produces") or [])
                 untouched = [n for n in mtimes_before if mtimes_after.get(n) == mtimes_before[n]]
                 if still_missing is not None or untouched:
-                    job_store.update(job_id, status="failed", current_stage=stage_name)
-                    _emit(job_id, {
-                        "type": "job_failed",
-                        "stage": stage_name,
-                        "message": (
-                            f"Stage '{stage_name}' was rejected, but the regenerated run "
-                            "finished without actually rewriting its required "
-                            f"artifact(s) {still_missing or untouched} — the agent may have "
-                            "stopped without acting on your feedback. Retry will re-run this stage."
-                        ),
-                    })
+                    _fail_job(job_id, stage=stage_name, message=(
+                        f"Stage '{stage_name}' was rejected, but the regenerated run "
+                        "finished without actually rewriting its required "
+                        f"artifact(s) {still_missing or untouched} — the agent may have "
+                        "stopped without acting on your feedback. Retry will re-run this stage."
+                    ))
                     return
                 _emit(job_id, {"type": "stage_completed", "stage": stage_name})
-                job_store.update(job_id, status="awaiting_approval")
-                _emit(job_id, {"type": "awaiting_approval", "stage": stage_name, "preview": _preview()})
+                _pause_for_approval(job_id, stage_name, preview=_preview())
                 approval = await job_store.wait_for_approval(job_id, timeout=3600.0)
                 if (job_store.get(job_id) or {}).get("cancel_requested"):
                     raise JobCancelled()
@@ -1536,16 +1550,12 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
     # for it, matching its actual, non-video deliverable.
     expects_render = any("render_report" in (s.get("produces") or []) for s in stages)
     if expects_render and not render_url:
-        job_store.update(job_id, status="failed")
-        _emit(job_id, {
-            "type": "job_failed",
-            "message": (
-                "All stages reported complete but no render file was discovered "
-                f"under {project_dir / 'renders'}, even though this pipeline "
-                "declares a render-producing stage — refusing to mark the job "
-                "completed without a real deliverable."
-            ),
-        })
+        _fail_job(job_id, message=(
+            "All stages reported complete but no render file was discovered "
+            f"under {project_dir / 'renders'}, even though this pipeline "
+            "declares a render-producing stage — refusing to mark the job "
+            "completed without a real deliverable."
+        ))
         return
 
     update_kwargs: dict[str, Any] = {"status": "completed", "render_url": render_url}
