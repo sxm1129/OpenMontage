@@ -23,6 +23,10 @@ export type SseEvent = {
   budget_cny?: number | null;
   gate?: string;
   stages?: string[];
+  // tool_call: best-effort, captured before _enforce_model_choice's autofill
+  // may run. asset_ready: the fully-resolved model that actually produced
+  // this asset, plus its real per-call cost — see tool_bridge.py.
+  model?: string | null;
 };
 
 // The union of every top-level stage name across all 13 pipeline_defs/*.yaml
@@ -53,6 +57,7 @@ const STATUS_MAP: Record<string, { label: string; cls: string }> = {
   awaiting_approval: { label: "待审批", cls: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30" },
   completed:         { label: "已完成", cls: "bg-green-500/20 text-green-400 border-green-500/30" },
   failed:            { label: "失败",   cls: "bg-red-500/20 text-red-400 border-red-500/30" },
+  cancelled:         { label: "已取消", cls: "bg-slate-500/20 text-slate-400 border-slate-500/30" },
 };
 
 // Style for a status the backend sent that isn't in STATUS_MAP — kept
@@ -68,7 +73,7 @@ const EVENT_COLOR: Record<string, string> = {
   job_completed: "text-green-400", job_failed: "text-red-400", error: "text-red-400",
   job_started: "text-blue-400", stage_skipped: "text-muted-foreground",
   stage_retry: "text-orange-400", cost_updated: "text-slate-400",
-  preview_ready: "text-emerald-400",
+  preview_ready: "text-emerald-400", job_cancelled: "text-slate-400",
   budget_exceeded: "text-red-400", budget_precall_block: "text-orange-400",
 };
 
@@ -80,10 +85,26 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   job_started: "任务开始", stage_skipped: "跳过阶段", stage_retry: "阶段重试",
   cost_updated: "费用更新", preview_ready: "预览就绪",
   budget_exceeded: "预算超限", budget_precall_block: "预算预检拦截",
+  asset_ready: "素材生成完成", job_cancelled: "任务已取消",
 };
+
+/** " · model · ¥cost" suffix, omitting whichever half is missing. Shared by
+ * tool_call (model only, cost not known yet) and asset_ready (both, once the
+ * call has actually succeeded) so the live log shows what's generating
+ * without the operator digging through inputs_preview. */
+function modelCostSuffix(ev: SseEvent): string {
+  const parts: string[] = [];
+  if (ev.model) parts.push(ev.model);
+  if (typeof ev.cost_cny === "number") parts.push(`¥${ev.cost_cny.toFixed(4)}`);
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
+}
 
 /** The human-facing label chosen for an event row (precedence matters). */
 export function eventLabel(ev: SseEvent): string {
+  if (ev.type === "tool_call" || ev.type === "asset_ready") {
+    const base = ev.summary ?? (ev.tool ? `${EVENT_TYPE_LABELS[ev.type]}: ${ev.tool}` : EVENT_TYPE_LABELS[ev.type]);
+    return `${base}${modelCostSuffix(ev)}`;
+  }
   return ev.summary ?? ev.text ?? ev.artifact ?? ev.message ?? EVENT_TYPE_LABELS[ev.type] ?? ev.type;
 }
 

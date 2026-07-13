@@ -23,7 +23,7 @@ function isNavActive(pathname: string, href: string): boolean {
 export function DashboardNav() {
   const pathname = usePathname();
   return (
-    <nav className="flex flex-col gap-1">
+    <nav className="flex flex-row md:flex-col gap-1 overflow-x-auto">
       {NAV.map((item) => {
         const active = isNavActive(pathname, item.href);
         return (

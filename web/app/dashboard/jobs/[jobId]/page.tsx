@@ -59,6 +59,7 @@ export default function JobDetailPage() {
   const [feedback, setFeedback] = useState("");
   const [approving, setApproving] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [actionError, setActionError] = useState("");
 
   // Inline edit state
@@ -157,6 +158,14 @@ export default function JobDetailPage() {
           setAwaitingStage(null);
           setAwaitingGate(null);
         }
+        if (ev.type === "job_cancelled") {
+          // Mirrors job_completed/job_failed above: a queued/running job's
+          // cancellation resolves asynchronously (see handleCancel) — this
+          // is how that eventual transition actually reaches the page.
+          setStatus("cancelled");
+          setAwaitingStage(null);
+          setAwaitingGate(null);
+        }
       };
       es.onerror = () => {
         es.close();
@@ -169,7 +178,9 @@ export default function JobDetailPage() {
         // reconnecting once the connection actually ends on one of them,
         // which is exactly when the backend intentionally closed the stream.
         const endedOnTerminalEvent =
-          lastEventTypeRef.current === "job_completed" || lastEventTypeRef.current === "job_failed";
+          lastEventTypeRef.current === "job_completed" ||
+          lastEventTypeRef.current === "job_failed" ||
+          lastEventTypeRef.current === "job_cancelled";
         if (endedOnTerminalEvent) {
           doneRef.current = true;
           return;
@@ -212,6 +223,38 @@ export default function JobDetailPage() {
       setActionError("网络错误，请检查后端是否可访问");
     } finally {
       setRetrying(false);
+    }
+  }
+
+  async function handleCancel() {
+    setCancelling(true);
+    setActionError("");
+    try {
+      const res = await fetch(`${SERVER}/jobs/${jobId}/cancel`, { method: "POST" });
+      if (res.ok) {
+        const body = await res.json().catch(() => ({}));
+        // Contract: a queued/running job comes back with its status
+        // UNCHANGED (cancellation happens asynchronously — the SSE
+        // job_cancelled event above, or the next poll, reflects the real
+        // transition once it lands). An awaiting_approval job resolves
+        // immediately to a terminal status, so reflect that right away
+        // instead of waiting on a stream event that won't arrive for an
+        // already-resolved gate.
+        if (body.status) {
+          setStatus(body.status);
+          if (body.status !== "queued" && body.status !== "running" && body.status !== "awaiting_approval") {
+            setAwaitingStage(null);
+            setAwaitingGate(null);
+          }
+        }
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setActionError(body.detail ?? `取消失败 (HTTP ${res.status})`);
+      }
+    } catch {
+      setActionError("网络错误，请检查后端是否可访问");
+    } finally {
+      setCancelling(false);
     }
   }
 
@@ -279,6 +322,9 @@ export default function JobDetailPage() {
   const progress = stageIndex >= 0 && stages.length > 0
     ? Math.round(((stageIndex + 1) / stages.length) * 100)
     : 0;
+  // Only offer cancellation while the job is still live / gated — not once
+  // it has already reached a terminal state (completed/failed/cancelled).
+  const isCancellable = status === "queued" || status === "running" || status === "awaiting_approval";
   const isBudgetGate = awaitingGate === "budget";
   const isSamplePreviewGate = awaitingGate === "sample_preview";
   const samplePreview = isSamplePreviewGate
@@ -306,6 +352,17 @@ export default function JobDetailPage() {
               ¥{costCny.toFixed(4)}
               {budgetCny != null && ` / ¥${budgetCny.toFixed(2)} 预算`}
             </span>
+          )}
+          {isCancellable && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCancel}
+              disabled={cancelling}
+              className="border-red-500/40 text-red-400 hover:bg-red-500/10"
+            >
+              {cancelling ? "取消中…" : "✕ 取消任务"}
+            </Button>
           )}
           <StatusBadge status={status} />
         </div>
@@ -372,6 +429,17 @@ export default function JobDetailPage() {
             <Button variant="outline" size="sm" onClick={handleRetry} disabled={retrying} className="border-red-500/40 text-red-400 hover:bg-red-500/10">
               {retrying ? "重试中…" : "↺ 重试"}
             </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Cancelled state — informational only; unlike the failed card above,
+          there's no retry action (the backend only allows retrying "failed"
+          jobs, not a deliberately cancelled one). */}
+      {status === "cancelled" && (
+        <Card className="border-border bg-muted/30">
+          <CardContent className="pt-4 pb-4">
+            <p className="text-sm font-medium text-muted-foreground">任务已取消</p>
           </CardContent>
         </Card>
       )}

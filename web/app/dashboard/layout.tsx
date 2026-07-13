@@ -3,11 +3,11 @@ import { DashboardNav } from "@/components/layout/dashboard-nav";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-screen bg-background">
+    <div className="flex flex-col md:flex-row h-screen bg-background">
       {/* Sidebar */}
-      <aside className="w-56 shrink-0 border-r border-border flex flex-col py-6 px-4 gap-6">
+      <aside className="w-full md:w-56 shrink-0 border-b md:border-b-0 md:border-r border-border flex flex-col py-6 px-4 gap-6">
         <div className="px-2">
-          <span className="text-lg font-bold tracking-tight text-foreground">OpenMontage</span>
+          <span className="text-lg font-bold tracking-tight text-foreground">xSmartCut</span>
           <p className="text-xs text-muted-foreground mt-0.5">AI 视频生产平台</p>
         </div>
         <Separator />

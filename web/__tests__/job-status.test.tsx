@@ -64,6 +64,23 @@ describe("eventLabel precedence", () => {
       expect(eventLabel(ev({ type }))).toBe(label);
     }
   });
+
+  it("appends model and cost to tool_call/asset_ready so the live log shows what's actually generating", () => {
+    // tool_call: model known before the call resolves, cost not yet.
+    expect(
+      eventLabel(ev({ type: "tool_call", tool: "maas_video", summary: "调用工具 maas_video", model: "leapfast/ltx-2.3" }))
+    ).toBe("调用工具 maas_video · leapfast/ltx-2.3");
+
+    // asset_ready: backend never sets summary for this type — falls back to
+    // a Chinese label + tool name, then appends the resolved model and the
+    // real per-call cost once the call has actually succeeded.
+    expect(
+      eventLabel(ev({ type: "asset_ready", tool: "maas_video", model: "leapfast/ltx-2.3", cost_cny: 0.35 }))
+    ).toBe("素材生成完成: maas_video · leapfast/ltx-2.3 · ¥0.3500");
+
+    // Neither field present (e.g. a non-billed/local tool) — no dangling " · ".
+    expect(eventLabel(ev({ type: "asset_ready", tool: "music_search" }))).toBe("素材生成完成: music_search");
+  });
 });
 
 describe("stageLabel", () => {
