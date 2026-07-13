@@ -3,8 +3,12 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { modelLabel, type ModelCatalog } from "@/lib/model-catalog";
-
-const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
+// Only the shared base-URL constant is used here — the Promise.allSettled
+// batch below deliberately keeps raw fetch: it relies on a rejected promise
+// (network failure / non-JSON body) surfacing as status "rejected", which
+// drives the "● 离线" badge. lib/api's apiRequest never rejects, so wrapping
+// it in would silently report the backend as healthy when it's unreachable.
+import { SERVER } from "@/lib/api";
 
 type HealthData = { status: string; service: string };
 type SystemInfo = { serverOk: boolean; jobs: number; brands: number };

@@ -5,6 +5,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+// Note: load()/handleSave()/handleDelete() below deliberately keep raw fetch
+// rather than lib/api's apiRequest — their control flow relies on a network
+// failure THROWING so it propagates to the enclosing try/catch (e.g. a failed
+// post-save reload must hit handleSave's catch and keep the form open with
+// its error visible, not fall through to the "close the form" success path).
+// apiRequest never throws, so only the reference-image uploads — which branch
+// on ok explicitly — use it.
+import { SERVER, apiRequest } from "@/lib/api";
 
 type BrandKit = {
   kit_id: string;
@@ -19,8 +27,6 @@ type BrandKit = {
   reference_image_path?: string;
   updated_at: number;
 };
-
-const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
 
 export default function BrandsPage() {
   const [kits, setKits] = useState<BrandKit[]>([]);
@@ -93,26 +99,20 @@ export default function BrandsPage() {
     if (!editing || !refImageFile) return;
     setUploadingRefImage(true);
     setRefImageError(null);
-    try {
-      const body = new FormData();
-      body.append("file", refImageFile);
-      const res = await fetch(`${SERVER}/brands/${editing.kit_id}/reference-image`, {
-        method: "POST",
-        body,
-      });
-      if (!res.ok) {
-        setRefImageError("上传失败，请重试");
-        return;
-      }
-      const data = await res.json();
-      setRefImagePreview(`${SERVER}${data.reference_image_url}`);
+    const body = new FormData();
+    body.append("file", refImageFile);
+    const res = await apiRequest(`/brands/${editing.kit_id}/reference-image`, {
+      method: "POST",
+      body,
+    });
+    if (!res.ok) {
+      setRefImageError("上传失败，请重试");
+    } else {
+      setRefImagePreview(`${SERVER}${res.data.reference_image_url}`);
       setRefImageVersion((v) => v + 1);
       setRefImageFile(null);
-    } catch {
-      setRefImageError("上传失败，请重试");
-    } finally {
-      setUploadingRefImage(false);
     }
+    setUploadingRefImage(false);
   }
 
   async function handleSave(e: React.FormEvent) {
@@ -146,17 +146,14 @@ export default function BrandsPage() {
           const newKit: BrandKit = await createRes.json();
           const uploadBody = new FormData();
           uploadBody.append("file", refImageFile);
-          let uploadOk = false;
-          try {
-            const uploadRes = await fetch(`${SERVER}/brands/${newKit.kit_id}/reference-image`, {
-              method: "POST",
-              body: uploadBody,
-            });
-            uploadOk = uploadRes.ok;
-          } catch {
-            uploadOk = false;
-          }
-          if (!uploadOk) {
+          // apiRequest never throws — a network failure comes back as
+          // ok: false, exactly the uploadOk = false this used to hand-roll
+          // with an inner try/catch.
+          const uploadRes = await apiRequest(`/brands/${newKit.kit_id}/reference-image`, {
+            method: "POST",
+            body: uploadBody,
+          });
+          if (!uploadRes.ok) {
             // The kit itself was created successfully — don't roll that
             // back or silently swallow the follow-up failure. Drop into
             // edit mode for the new kit so the error stays visible and a

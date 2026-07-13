@@ -8,8 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
 import { StatusBadge, EventRow, stageLabel, mediaUrl, type SseEvent } from "@/components/job-status";
-
-const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
+import { SERVER, apiRequest } from "@/lib/api";
 
 // SSE reconnect backoff: starts at the base interval and doubles on each
 // consecutive failure, capped at the max — a multi-minute backend outage
@@ -81,17 +80,15 @@ export default function JobDetailPage() {
   // events from lastEventId onward; the page title (and cost/status on a
   // fresh load) shouldn't have to wait for the full event replay to resolve.
   useEffect(() => {
-    fetch(`${SERVER}/jobs/${jobId}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((job) => {
-        if (!job) return;
-        if (job.project_name) setProjectName(job.project_name);
-        if (job.render_url) setRenderUrl(job.render_url);
-        if (job.preview_render_url) setPreviewRenderUrl(job.preview_render_url);
-        if (job.render_urls) setRenderUrls(job.render_urls);
-        if (job.preview_render_urls) setPreviewRenderUrls(job.preview_render_urls);
-      })
-      .catch(() => {});
+    apiRequest(`/jobs/${jobId}`).then((r) => {
+      if (!r.ok) return;
+      const job = r.data;
+      if (job.project_name) setProjectName(job.project_name);
+      if (job.render_url) setRenderUrl(job.render_url);
+      if (job.preview_render_url) setPreviewRenderUrl(job.preview_render_url);
+      if (job.render_urls) setRenderUrls(job.render_urls);
+      if (job.preview_render_urls) setPreviewRenderUrls(job.preview_render_urls);
+    });
   }, [jobId]);
 
   useEffect(() => {
@@ -205,82 +202,66 @@ export default function JobDetailPage() {
   async function handleRetry() {
     setRetrying(true);
     setActionError("");
-    try {
-      const res = await fetch(`${SERVER}/jobs/${jobId}/retry`, { method: "POST" });
-      if (res.ok) {
-        setStatus("queued");
-        // The previous EventSource already closed (the backend ended that
-        // stream once it drained to the earlier terminal event) and nothing
-        // was scheduled to reconnect it, so open a fresh one from where we
-        // left off rather than just flipping a flag nothing reacts to.
-        doneRef.current = false;
-        connectRef.current?.();
-      } else {
-        const body = await res.json().catch(() => ({}));
-        setActionError(body.detail ?? `重试失败 (HTTP ${res.status})`);
-      }
-    } catch {
-      setActionError("网络错误，请检查后端是否可访问");
-    } finally {
-      setRetrying(false);
+    const res = await apiRequest(`/jobs/${jobId}/retry`, { method: "POST" });
+    if (res.ok) {
+      setStatus("queued");
+      // The previous EventSource already closed (the backend ended that
+      // stream once it drained to the earlier terminal event) and nothing
+      // was scheduled to reconnect it, so open a fresh one from where we
+      // left off rather than just flipping a flag nothing reacts to.
+      doneRef.current = false;
+      connectRef.current?.();
+    } else {
+      setActionError(res.detail);
     }
+    setRetrying(false);
   }
 
   async function handleCancel() {
     setCancelling(true);
     setActionError("");
-    try {
-      const res = await fetch(`${SERVER}/jobs/${jobId}/cancel`, { method: "POST" });
-      if (res.ok) {
-        const body = await res.json().catch(() => ({}));
-        // Contract: a queued/running job comes back with its status
-        // UNCHANGED (cancellation happens asynchronously — the SSE
-        // job_cancelled event above, or the next poll, reflects the real
-        // transition once it lands). An awaiting_approval job resolves
-        // immediately to a terminal status, so reflect that right away
-        // instead of waiting on a stream event that won't arrive for an
-        // already-resolved gate.
-        if (body.status) {
-          setStatus(body.status);
-          if (body.status !== "queued" && body.status !== "running" && body.status !== "awaiting_approval") {
-            setAwaitingStage(null);
-            setAwaitingGate(null);
-          }
+    const res = await apiRequest(`/jobs/${jobId}/cancel`, { method: "POST" });
+    if (res.ok) {
+      const body = res.data;
+      // Contract: a queued/running job comes back with its status
+      // UNCHANGED (cancellation happens asynchronously — the SSE
+      // job_cancelled event above, or the next poll, reflects the real
+      // transition once it lands). An awaiting_approval job resolves
+      // immediately to a terminal status, so reflect that right away
+      // instead of waiting on a stream event that won't arrive for an
+      // already-resolved gate.
+      if (body.status) {
+        setStatus(body.status);
+        if (body.status !== "queued" && body.status !== "running" && body.status !== "awaiting_approval") {
+          setAwaitingStage(null);
+          setAwaitingGate(null);
         }
-      } else {
-        const body = await res.json().catch(() => ({}));
-        setActionError(body.detail ?? `取消失败 (HTTP ${res.status})`);
       }
-    } catch {
-      setActionError("网络错误，请检查后端是否可访问");
-    } finally {
-      setCancelling(false);
+    } else {
+      setActionError(res.detail);
     }
+    setCancelling(false);
   }
 
   async function handleApproval(action: "approve" | "reject") {
     setApproving(true);
     setActionError("");
-    try {
-      const res = await fetch(`${SERVER}/jobs/${jobId}/approve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, feedback }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setActionError(
-          body.detail ?? `操作失败 (HTTP ${res.status}) — 任务状态可能已变化，请刷新页面查看最新状态`
-        );
-        return;
-      }
-      setFeedback("");
-      if (action === "approve") setAwaitingStage(null);
-    } catch {
-      setActionError("网络错误，请检查后端是否可访问");
-    } finally {
+    const res = await apiRequest(`/jobs/${jobId}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, feedback }),
+    });
+    if (!res.ok) {
+      // A non-ok here usually means the job's real status moved on
+      // server-side while this tab was idle (gate already resolved, job
+      // failed, etc.) — the backend's detail explains which.
+      setActionError(res.detail);
       setApproving(false);
+      return;
     }
+    setFeedback("");
+    if (action === "approve") setAwaitingStage(null);
+    setApproving(false);
   }
 
   async function handleSaveEdit() {
@@ -293,29 +274,23 @@ export default function JobDetailPage() {
       return;
     }
     setSaving(true);
-    try {
-      // Persist edited artifact via the save-artifact endpoint
-      const res = await fetch(`${SERVER}/jobs/${jobId}/artifact`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ stage: awaitingStage, content: parsed }),
-      });
-      if (res.ok) {
-        setPreview(parsed);
-        setEditMode(false);
-      } else {
-        // Surface the backend's actual reason (e.g. the artifact-save
-        // endpoint's 400 for a stage name that isn't one of this job's
-        // real pipeline stages) instead of a generic message that hides
-        // why the save silently did nothing.
-        const body = await res.json().catch(() => ({}));
-        setEditError(body.detail ?? `保存失败 (HTTP ${res.status})，请重试`);
-      }
-    } catch {
-      setEditError("网络错误，请检查后端是否可访问");
-    } finally {
-      setSaving(false);
+    // Persist edited artifact via the save-artifact endpoint
+    const res = await apiRequest(`/jobs/${jobId}/artifact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stage: awaitingStage, content: parsed }),
+    });
+    if (res.ok) {
+      setPreview(parsed);
+      setEditMode(false);
+    } else {
+      // Surface the backend's actual reason (e.g. the artifact-save
+      // endpoint's 400 for a stage name that isn't one of this job's
+      // real pipeline stages) instead of a generic message that hides
+      // why the save silently did nothing.
+      setEditError(res.detail);
     }
+    setSaving(false);
   }
 
   const stageIndex = currentStage ? stages.indexOf(currentStage) : -1;

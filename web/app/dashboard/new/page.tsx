@@ -14,8 +14,7 @@ import {
   type PipelineInfo, type PipelineOption,
 } from "@/lib/pipeline-picker";
 import { modelLabel, FALLBACK_MODEL_CATALOG, type ModelCatalog } from "@/lib/model-catalog";
-
-const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
+import { SERVER, apiRequest } from "@/lib/api";
 
 const DEFAULT_VIDEO_MODEL = FALLBACK_MODEL_CATALOG.video_models[0];
 const DEFAULT_IMAGE_MODEL = FALLBACK_MODEL_CATALOG.image_models[0];
@@ -72,21 +71,23 @@ export default function NewProjectPage() {
   const [intervalSilence, setIntervalSilence] = useState(200);
 
   useEffect(() => {
-    fetch(`${SERVER}/brands`)
-      .then((r) => r.json())
-      .then((d) => setBrandKits(d.brand_kits ?? []))
-      .catch(() => {});
-    fetch(`${SERVER}/pipelines`)
-      .then((r) => r.json())
-      .then((d) => setPipelines(d.pipelines ?? []))
-      .catch(() => setPipelinesLoadFailed(true));
+    apiRequest("/brands").then((r) => {
+      if (r.ok) setBrandKits(r.data.brand_kits ?? []);
+    });
+    // Only a network-level failure (status 0, backend unreachable) marks the
+    // pipeline list as failed-to-load — this mirrors the original `.catch()`
+    // placement, where a reachable backend answering non-OK JSON still
+    // resolved the promise chain without tripping the failure flag.
+    apiRequest("/pipelines").then((r) => {
+      if (r.ok) setPipelines(r.data.pipelines ?? []);
+      else if (r.status === 0) setPipelinesLoadFailed(true);
+    });
     // Live model catalog — falls back to FALLBACK_MODEL_CATALOG (already the
     // initial state) if this hasn't resolved yet or fails, same pattern as
     // isPipelineAvailable's "show everything before /pipelines loads".
-    fetch(`${SERVER}/system/capabilities`)
-      .then((r) => r.json())
-      .then((d) => { if (d.model_catalog) setModelCatalog(d.model_catalog); })
-      .catch(() => {});
+    apiRequest("/system/capabilities").then((r) => {
+      if (r.ok && r.data.model_catalog) setModelCatalog(r.data.model_catalog);
+    });
   }, []);
 
   const availableNames = new Set(pipelines.map((p) => p.name));
@@ -110,6 +111,11 @@ export default function NewProjectPage() {
     setSubmitError("");
 
     try {
+      // Deliberately raw fetch, not lib/api's apiRequest: this flow reads
+      // data.job_id off the success body, and its error surface is richer
+      // than the shared helper's normalized detail — the non-ok fallback
+      // embeds the whole response body (JSON.stringify below) and the
+      // network-error message carries a "创建失败：" prefix.
       const res = await fetch(`${SERVER}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

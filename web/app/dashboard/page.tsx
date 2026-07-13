@@ -4,7 +4,9 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { stageLabel } from "@/components/job-status";
+import { StatusBadge, stageLabel } from "@/components/job-status";
+import { CONTENT_TYPES } from "@/lib/pipeline-picker";
+import { apiRequest } from "@/lib/api";
 
 type Job = {
   job_id: string;
@@ -16,33 +18,21 @@ type Job = {
   brand_info?: { brand_name?: string };
 };
 
-const STATUS_META: Record<string, { label: string; cls: string }> = {
-  queued:            { label: "排队中", cls: "bg-muted text-muted-foreground border-border" },
-  running:           { label: "生成中", cls: "bg-blue-500/15 text-blue-400 border-blue-500/30" },
-  awaiting_approval: { label: "待审批", cls: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30" },
-  completed:         { label: "已完成", cls: "bg-green-500/15 text-green-400 border-green-500/30" },
-  failed:            { label: "失败",   cls: "bg-red-500/15 text-red-400 border-red-500/30" },
-};
-
-const CONTENT_TYPE_LABEL: Record<string, string> = {
-  marketing_film: "营销宣传片",
-  explainer: "解说视频",
-  podcast: "播客剪辑",
-};
+// Derived from the wizard's CONTENT_TYPES so this list can never drift out of
+// sync with it again — this page used to hardcode its own copy, which lacked
+// the "demo" and "short" entries, so those jobs showed raw ids. Unknown ids
+// still fall back to the raw content_type at the lookup site below.
+const CONTENT_TYPE_LABEL: Record<string, string> = Object.fromEntries(
+  CONTENT_TYPES.map((ct) => [ct.id, ct.label])
+);
 
 export default function DashboardPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
 
   async function fetchJobs() {
-    const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:8000";
-    try {
-      const res = await fetch(`${SERVER}/jobs`);
-      if (res.ok) {
-        const data = await res.json();
-        setJobs(data.jobs ?? []);
-      }
-    } catch {}
+    const res = await apiRequest("/jobs");
+    if (res.ok) setJobs(res.data.jobs ?? []);
     setLoading(false);
   }
 
@@ -83,7 +73,6 @@ export default function DashboardPage() {
       {!loading && jobs.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
           {jobs.map((job) => {
-            const s = STATUS_META[job.status] ?? STATUS_META.queued;
             const displayName = job.project_name || job.brand_info?.brand_name || job.job_id;
             const contentLabel = CONTENT_TYPE_LABEL[job.content_type] ?? job.content_type;
             const date = new Date(job.created_at * 1000).toLocaleDateString("zh-CN");
@@ -109,8 +98,15 @@ export default function DashboardPage() {
                   <CardHeader className="pb-2">
                     <div className="flex items-start justify-between gap-2">
                       <CardTitle className="text-base leading-tight">{displayName}</CardTitle>
-                      <span className={`shrink-0 text-[11px] px-2 py-0.5 rounded-full border font-medium ${s.cls}`}>
-                        {s.label}
+                      {/* Shared badge from job-status.tsx — this page used to
+                          hardcode a near-identical STATUS_META map that lacked
+                          "cancelled", so a cancelled job fell back to the
+                          "排队中" (queued) badge here while its own detail
+                          page correctly showed "已取消". The shrink-0 wrapper
+                          keeps the badge from collapsing next to a long
+                          project title, as the old inline span did. */}
+                      <span className="shrink-0">
+                        <StatusBadge status={job.status} />
                       </span>
                     </div>
                     <CardDescription className="text-xs">{contentLabel}</CardDescription>
