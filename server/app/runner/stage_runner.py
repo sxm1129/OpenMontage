@@ -29,7 +29,23 @@ from openai import OpenAI
 
 from app.store import job_store
 from app.runner.tool_bridge import (
-    TOOL_SCHEMAS, execute_tool, BudgetExceededError, variant_slug, READ_FILE_CHAR_CAP,
+    TOOL_SCHEMAS, execute_tool, BudgetExceededError, READ_FILE_CHAR_CAP,
+)
+# Render discovery + produces-vs-reality validators: split out into
+# render_checks.py (stateless leaf functions, no orchestration
+# dependencies — see that module's docstring) and re-imported here so every
+# call site below, and every existing
+# `from app.runner.stage_runner import _discover_render_url, ...` in the test
+# suite, keeps working unchanged. Pure code motion, not a behavior change.
+from app.runner.render_checks import (
+    _PRODUCES_EXPORT_VALIDATORS,
+    _discover_render_path,
+    _discover_render_url,
+    _discover_render_urls,
+    _missing_variants,
+    _render_report_path_diverges,
+    _url_for_render,
+    _validate_publish_log_exports,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,64 +79,80 @@ LLM_REQUEST_TIMEOUT_SECONDS = 120.0
 
 llm = OpenAI(api_key=MAAS_KEY, base_url=f"{MAAS_BASE}/v1", timeout=LLM_REQUEST_TIMEOUT_SECONDS)
 
-# ── Cinematic pipeline stage definitions ─────────────────────────────────────
-CINEMATIC_STAGES = [
-    {"name": "research",    "skill": "skills/pipelines/cinematic/research-director.md",   "approval": False, "produces": ["research_brief"], "required_artifacts_in": []},
-    {"name": "proposal",    "skill": "skills/pipelines/cinematic/proposal-director.md",   "approval": True,  "produces": ["proposal_packet", "decision_log"], "required_artifacts_in": ["research_brief"]},
-    {"name": "script",      "skill": "skills/pipelines/cinematic/script-director.md",     "approval": True,  "produces": ["script"], "required_artifacts_in": ["proposal_packet"]},
-    # scene_plan/assets/publish must mirror pipeline_defs/cinematic.yaml's
-    # human_approval_default exactly — this hardcoded list drifted false for
-    # all three (confirmed via a deep code review) while the manifest and
-    # every one of these stages' own director skills ("Gate Reminder
-    # (Binding)") were updated to require a checkpoint, silently skipping the
-    # asset-generation cost gate for every job run through this runner.
+# ── Cinematic pipeline stage tuning ──────────────────────────────────────────
+# Runner-side per-stage overrides, overlaid onto the manifest-derived stage
+# dict inside _resolve_stages below. These values (max_turns / temperature)
+# deliberately do NOT live in pipeline_defs/cinematic.yaml — the manifest
+# schema (schemas/pipelines/pipeline_manifest.schema.json) sets
+# additionalProperties: false on stage items with no max_turns/temperature
+# keys, and tuning is engine-runtime behavior, not a declarative pipeline
+# property. Keyed by (pipeline_name, stage_name) so a future pipeline can get
+# its own tuning without touching another's; "marketing_film" needs no entry
+# of its own since it resolves via cinematic (see PIPELINE_MAP below).
+_STAGE_TUNING: dict[tuple[str, str], dict] = {
     # scene_plan/assets/edit/compose write schema-shaped JSON that downstream
     # stages parse structurally — a lower temperature trades away creative
     # variance (not needed here) for more reliable schema-following and less
     # truncation/format drift, vs. the default 0.7 kept for the genuinely
     # creative stages (research, proposal, script, publish).
-    {"name": "scene_plan",  "skill": "skills/pipelines/cinematic/scene-director.md",      "approval": True,  "produces": ["scene_plan"], "required_artifacts_in": ["script"], "temperature": 0.3},
+    ("cinematic", "scene_plan"): {"temperature": 0.3},
     # max_turns doubled vs. the global default (20) — this stage places one
     # or more generation calls (video/image/tts) per scene across the whole
     # scene_plan, which routinely needs more turns than a single-artifact
     # planning stage.
-    {"name": "assets",      "skill": "skills/pipelines/cinematic/asset-director.md",      "approval": True,  "produces": ["asset_manifest"], "required_artifacts_in": ["scene_plan"], "max_turns": 40, "temperature": 0.3},
-    {"name": "edit",        "skill": "skills/pipelines/cinematic/edit-director.md",       "approval": False, "produces": ["edit_decisions"], "required_artifacts_in": ["scene_plan", "asset_manifest"], "temperature": 0.3},
+    ("cinematic", "assets"): {"max_turns": 40, "temperature": 0.3},
+    ("cinematic", "edit"): {"temperature": 0.3},
     # max_turns doubled vs. the global default (20), same rationale as
     # "assets" above — compose is at least as tool-call-heavy (per-variant
     # render calls, trim/stitch/color-grade/audio-mix passes, etc.) and
     # confirmed live to hit the 20-turn ceiling on a real run.
-    {"name": "compose",     "skill": "skills/pipelines/cinematic/compose-director.md",    "approval": False, "produces": ["render_report", "final_review"], "required_artifacts_in": ["edit_decisions", "asset_manifest"], "max_turns": 40, "temperature": 0.3},
-    {"name": "publish",     "skill": "skills/pipelines/cinematic/publish-director.md",    "approval": True,  "produces": ["publish_log"], "required_artifacts_in": ["render_report", "final_review"]},
-]
+    ("cinematic", "compose"): {"max_turns": 40, "temperature": 0.3},
+}
 
-# Explicit overrides / aliases. Anything NOT here is resolved dynamically from
-# the engine's pipeline_defs/<name>.yaml manifest, so every engine pipeline
-# (animated-explainer, screen-demo, podcast-repurpose, …) is runnable via the
-# web platform without hardcoding its stages here.
-PIPELINE_MAP = {
-    "cinematic": CINEMATIC_STAGES,
-    "marketing_film": CINEMATIC_STAGES,   # alias → cinematic stages
+# Pure alias table: "marketing_film" has no pipeline_defs/*.yaml manifest of
+# its own and instead reuses cinematic's manifest-derived stages verbatim.
+# cinematic itself is NOT listed here — it resolves through the exact same
+# pipeline_defs/<name>.yaml manifest path as every other engine pipeline (see
+# _resolve_stages below) instead of a second, hand-maintained Python stage
+# list that could (and, confirmed via a deep code review, did) silently drift
+# out of sync with the manifest's human_approval_default/produces/
+# required_artifacts_in. Anything NOT in this table is resolved dynamically
+# from the manifest, so every engine pipeline (animated-explainer,
+# screen-demo, podcast-repurpose, …) is runnable via the web platform without
+# hardcoding its stages here.
+PIPELINE_MAP: dict[str, Any] = {
+    "marketing_film": "cinematic",   # alias → cinematic's manifest-derived stages
 }
 
 
 def _resolve_stages(pipeline_name: str) -> list[dict]:
     """Return the stage list for a pipeline.
 
-    Precedence: explicit PIPELINE_MAP override → pipeline_defs manifest →
-    cinematic fallback. Manifest stages map skill "pipelines/x/y-director" to
+    Precedence: PIPELINE_MAP entry → pipeline_defs manifest (with
+    _STAGE_TUNING overlaid on top, see its docstring) → cinematic fallback.
+    Manifest stages map skill "pipelines/x/y-director" to
     "skills/pipelines/x/y-director.md" and human_approval_default to approval.
+
+    A PIPELINE_MAP entry can be either a string (an alias — re-resolved under
+    the aliased name, so it goes through the exact same manifest + tuning
+    path as the pipeline it aliases) or a literal list of stage dicts (a raw
+    override, returned as-is with no manifest involved at all — used by tests
+    that need precise control over stage behavior).
     """
-    if pipeline_name in PIPELINE_MAP:
-        return PIPELINE_MAP[pipeline_name]
+    override = PIPELINE_MAP.get(pipeline_name)
+    if isinstance(override, str):
+        return _resolve_stages(override)
+    if override is not None:
+        return override
     try:
         from app.pipeline_catalog import load_manifest
         manifest = load_manifest(pipeline_name)
         stages = []
         for s in manifest.get("stages", []):
             skill = s.get("skill")
-            stages.append({
-                "name": s["name"],
+            stage_name = s["name"]
+            stage = {
+                "name": stage_name,
                 # None (not "") for skill-less stages — Path(OM_ROOT) / "" is
                 # OM_ROOT itself (a directory that .exists()), which would
                 # defeat the missing-skill fallback below and crash on
@@ -139,7 +171,11 @@ def _resolve_stages(pipeline_name: str) -> list[dict]:
                 # message instead of silently prompting the agent on an
                 # incomplete "Available artifacts" summary.
                 "required_artifacts_in": s.get("required_artifacts_in") or [],
-            })
+            }
+            tuning = _STAGE_TUNING.get((pipeline_name, stage_name))
+            if tuning:
+                stage.update(tuning)
+            stages.append(stage)
         if stages:
             return stages
     except Exception:
@@ -152,7 +188,14 @@ def _resolve_stages(pipeline_name: str) -> list[dict]:
             "Failed to load pipeline manifest %r; falling back to cinematic stages",
             pipeline_name, exc_info=True,
         )
-    return CINEMATIC_STAGES
+    if pipeline_name == "cinematic":
+        # cinematic's own manifest failed to load or declared zero stages —
+        # nothing left to fall back to without recursing forever. In
+        # practice this never triggers (pipeline_defs/cinematic.yaml is
+        # well-formed); an empty list here just means "no stages resolved",
+        # same as the manifest-returned-no-stages case above.
+        return []
+    return _resolve_stages("cinematic")
 
 MAX_TURNS  = 20
 # How many pause→resume round-trips a single stage run allows for its
@@ -1325,92 +1368,79 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
                 _fail_job(job_id, stage=stage_name, message=runtime_mismatch)
                 return
 
-        # The compose stage's render_report/final_review artifacts existing
-        # (checked above) is NOT proof a video actually got rendered — a
-        # video_compose call can fail, and confirmed live: an agent that hit
-        # exactly that failure fabricated a plausible-looking render_report
-        # (invented file paths under a DIFFERENT project name, invented file
-        # sizes, an invented render duration) instead of retrying or
-        # reporting the failure honestly, and the job then showed as
-        # "completed" with zero actual deliverable. Require a real file under
-        # renders/ (the same glob the preview/final-video UI relies on) —
-        # don't trust the artifact's own claims about what it produced.
+        # Every completing stage's claims about what it actually produced are
+        # checked against reality by ONE produces-keyed table,
+        # _PRODUCES_EXPORT_VALIDATORS — this used to be four separate
+        # mechanisms, bolted on one at a time as each fabrication incident was
+        # found live:
+        #   1. A literal `stage_name == "compose"` check that a real file
+        #      exists under renders/ (the same glob the preview/final-video
+        #      UI relies on) — confirmed live: an agent that hit a
+        #      video_compose failure fabricated a plausible-looking
+        #      render_report (invented file paths under a DIFFERENT project
+        #      name, invented file sizes, an invented render duration)
+        #      instead of retrying or reporting the failure honestly, and the
+        #      job then showed as "completed" with zero actual deliverable.
+        #      render_report/final_review existing is not proof a video
+        #      actually got rendered — don't trust the artifact's own claims.
+        #   2. A separate _render_report_path_diverges() warning check —
+        #      render_report's own claims (output path here; runtime/counts
+        #      elsewhere) are never cross-validated against reality
+        #      otherwise — confirmed live: render_report claimed a DIFFERENT
+        #      output filename than the one actually discovered on disk. A
+        #      wrong internal path claim while a real file DOES exist is
+        #      lower-severity than no file at all — warn, don't fail.
+        #   3. A separate _missing_variants() call — the file-exists check
+        #      alone only requires ANY render file to exist; in a
+        #      multi-variant A/B job (options.video_model_variants declares
+        #      more than one model) that passes even when some declared
+        #      variants never actually rendered (e.g. 2 of 3 succeeded, the
+        #      3rd's generation call failed). Silently completing with
+        #      partial output would hide that a whole variant is missing —
+        #      require every declared variant to have its own render file.
+        #   4. This same produces-keyed loop, previously carrying only the
+        #      publish_log case — confirmed live: a publish_log artifact
+        #      claimed 5 real export files (teaser cut, platform-specific
+        #      crops, poster frame) that were never generated (no exports/
+        #      directory ever created, zero video-processing tool calls in
+        #      that stage's trace).
+        # (1)-(3) are now folded into a "render_report" table entry (see
+        # _validate_render_report_produces in render_checks.py) so any
+        # current/future stage whose produces declares a validated artifact
+        # name gets the same anti-fabrication treatment through one
+        # mechanism, instead of each new incident growing its own bespoke
+        # wiring here. Each validator returns a ProducesValidation
+        # (hard_failures + warnings) so every entry — file-existence,
+        # path-divergence, variant-completeness, export-existence — is
+        # handled uniformly at this single call site.
+        #
+        # "render_report"'s activation is gated on the literal stage name
+        # "compose", NOT on a declared produces list — this mirrors the
+        # ORIGINAL behavior exactly (the render-file check used to be a bare
+        # `stage_name == "compose"` check with no produces involvement at
+        # all), and is exactly why a stage genuinely renamed away from
+        # "compose" (but still declaring produces=["render_report"]) does NOT
+        # get this per-stage check and instead relies solely on the SEPARATE
+        # job-completion-level `expects_render` fallback near the end of this
+        # function (see
+        # test_job_completion_refuses_without_render_file_even_if_stage_not_named_compose,
+        # which asserts exactly that gap). Every OTHER entry (e.g.
+        # publish_log) keeps the produces-keyed activation it always had.
+        _produces_to_validate = set(stage_def.get("produces") or [])
         if stage_name == "compose":
-            _compose_render_path = _discover_render_path(project_dir)
-            if _compose_render_path is None:
-                _fail_job(job_id, stage=stage_name, message=(
-                    "Stage 'compose' wrote render_report/final_review but no actual "
-                    f"render file exists under {project_dir / 'renders'} — the "
-                    "report's claimed output isn't backed by a real file. Retry will "
-                    "re-run this stage."
-                ))
-                return
-            # render_report's own claims (output path here; runtime/counts
-            # elsewhere) are never cross-validated against reality otherwise
-            # — confirmed live: render_report claimed a DIFFERENT output
-            # filename than the one actually discovered on disk. A wrong
-            # internal path claim while a real file DOES exist is
-            # lower-severity than no file at all (handled above) — warn,
-            # don't fail the stage.
-            _render_report = _load_artifacts(project_dir).get("render_report") or {}
-            _claimed_path_mismatch = _render_report_path_diverges(
-                project_dir, _render_report, _compose_render_path
-            )
-            if _claimed_path_mismatch:
-                _emit(job_id, {
-                    "type": "warning",
-                    "stage": stage_name,
-                    "message": (
-                        f"render_report claims output path '{_claimed_path_mismatch}' but "
-                        "the actual discovered render file is "
-                        f"'{_compose_render_path.relative_to(project_dir)}' — the report's "
-                        "internal path claim doesn't match reality (a real file does "
-                        "exist, so the stage still proceeds)."
-                    ),
-                })
-
-        # The generalized anti-fabrication check above (compose/
-        # render_report) has no equivalent for other stages that also
-        # declare file-backed exports — confirmed live: a publish_log
-        # artifact claimed 5 real export files (teaser cut, platform-specific
-        # crops, poster frame) that were never generated (no exports/
-        # directory ever created, zero video-processing tool calls in that
-        # stage's trace). Key off the completing stage's declared `produces`
-        # contract rather than a literal stage-name check, so this holds for
-        # any current/future stage whose produces includes a validated
-        # artifact name (see _PRODUCES_EXPORT_VALIDATORS).
+            _produces_to_validate.add("render_report")
+        else:
+            _produces_to_validate.discard("render_report")
         for _artifact_name, _validator in _PRODUCES_EXPORT_VALIDATORS.items():
-            if _artifact_name not in (stage_def.get("produces") or []):
+            if _artifact_name not in _produces_to_validate:
                 continue
             _artifact_value = _load_artifacts(project_dir).get(_artifact_name) or {}
-            _missing_exports = _validator(project_dir, _artifact_value)
-            if _missing_exports:
+            _validation = _validator(project_dir, _artifact_value, options)
+            for _warning_msg in _validation.warnings:
+                _emit(job_id, {"type": "warning", "stage": stage_name, "message": _warning_msg})
+            if _validation.hard_failures:
                 _fail_job(job_id, stage=stage_name, message=(
-                    f"Stage '{stage_name}' wrote {_artifact_name} claiming export(s) "
-                    f"{_missing_exports}, but no file exists at that path under "
-                    f"{project_dir} — the artifact's claimed output isn't backed by a "
-                    "real file. Retry will re-run this stage."
-                ))
-                return
-
-        # The check above only requires ANY render file to exist — in a
-        # multi-variant A/B job (options.video_model_variants declares more
-        # than one model) that passes even when some declared variants never
-        # actually rendered (e.g. 2 of 3 succeeded, the 3rd's generation
-        # call failed). Silently completing with partial output would hide
-        # that a whole variant is missing. Require every declared variant to
-        # have its own render file before treating this stage as genuinely
-        # complete.
-        if stage_name == "compose":
-            missing_variants = _missing_variants(project_dir, options)
-            if missing_variants:
-                total_variants = len(options.get("video_model_variants") or [])
-                _fail_job(job_id, stage=stage_name, message=(
-                    f"Stage 'compose' is an A/B variants job ({total_variants} "
-                    f"declared), but {len(missing_variants)} variant(s) never "
-                    f"produced a render file: {missing_variants}. Refusing to mark "
-                    "a multi-variant compose stage complete with partial output. "
-                    "Retry will re-run this stage."
+                    f"Stage '{stage_name}': " + " ".join(_validation.hard_failures)
                 ))
                 return
 
@@ -1569,133 +1599,6 @@ async def _run_pipeline_impl(job_id: str, data: dict) -> None:
     })
 
 
-# Tool names (registry `name`, from tools/tool_registry.py) capable of
-# producing the FINAL composed video — the whole-film render, not a per-clip
-# editing op. tool_bridge.py names every non-final-compose video_post output
-# "{tool_name}{variant_tag}_{unique}.mp4" and writes it under assets/video_post/
-# (only a call whose `operation` resolves to "compose" is treated as final and
-# routed to renders/ instead — see tool_bridge.py's is_final_compose). A call
-# using one of these SAME tool names but a different operation (e.g.
-# operation="render"/"remotion_render", which still legitimately produces the
-# whole film via Remotion/HyperFrames) also lands in assets/video_post/, so
-# this is deliberately a whitelist of compose-capable tool names, not a check
-# on the operation string itself.
-_COMPOSE_FAMILY_TOOL_PREFIXES = ("video_compose_", "hyperframes_compose_")
-
-
-def _discover_render_path(project_dir: Path) -> Path | None:
-    """Find the final rendered video file on disk, or None if none exists.
-
-    Extracted out of _discover_render_url so a caller that needs the actual
-    Path (not just a servable URL) — e.g. cross-validating render_report's
-    own claimed output path against reality — doesn't have to re-derive it.
-    """
-    def _newest(paths: list[Path]) -> Path | None:
-        existing = [p for p in paths if p.is_file()]
-        if not existing:
-            return None
-        return max(existing, key=lambda p: p.stat().st_mtime)
-
-    candidate = _newest(list((project_dir / "renders").glob("*.mp4")))
-    if candidate is None:
-        # Fallback: a compose-family tool (video_compose/hyperframes_compose,
-        # capability="video_post") wrote its output under assets/ instead of
-        # renders/ — e.g. operation="render"/"remotion_render" is a legitimate
-        # final render but isn't routed to renders/ by tool_bridge.py (only
-        # operation="compose" is). Scoped to those two tool names specifically
-        # — NOT every assets/video_post/*.mp4 — because trim/stitch/etc. calls
-        # (video_trimmer, video_stitch, ...) write their INTERMEDIATE,
-        # non-final clips to this same folder using the same naming scheme.
-        # Without this scoping, a trim/stitch call that ran earlier in this
-        # stage's conversation, followed by a final compose call that then
-        # FAILED, would leave that intermediate clip sitting here as the
-        # newest assets/video_post/*.mp4 — and the old unscoped glob picked
-        # exactly that up and presented it as the finished render (the same
-        # bug class already fixed once below for assets/video_generation/*.mp4
-        # raw scene clips).
-        candidate = _newest([
-            p for p in project_dir.glob("assets/video_post/*.mp4")
-            if p.name.startswith(_COMPOSE_FAMILY_TOOL_PREFIXES)
-        ])
-    if candidate is None:
-        # Last resort: a misnamed compose output (.bin) that is really an mp4
-        candidate = _newest(list(project_dir.glob("assets/video_post/*compose*output*")))
-
-    return candidate
-
-
-def _discover_render_url(project_dir: Path, project_name: str) -> str | None:
-    """Find the final rendered video and return a browser-servable /media URL."""
-    candidate = _discover_render_path(project_dir)
-    if candidate is None:
-        return None
-    return _url_for_render(project_dir, project_name, candidate)
-
-
-def _render_report_path_diverges(
-    project_dir: Path, render_report: dict, discovered: Path | None
-) -> str | None:
-    """Return render_report's own claimed output path if it differs from the
-    actually-discovered render file, else None.
-
-    Confirmed live: even in a run that passed the render-file-existence
-    check (a real mp4 existed), render_report claimed a DIFFERENT output
-    filename than the one actually discovered. A wrong internal path claim
-    while a real file DOES exist is lower-severity than no file at all
-    (already hard-failed separately) — this only informs, it never fails
-    the stage.
-    """
-    if discovered is None:
-        return None
-    outputs = (render_report or {}).get("outputs") or []
-    if not outputs:
-        return None
-    claimed = outputs[0].get("path")
-    if not claimed:
-        return None
-    try:
-        claimed_resolved = (project_dir / claimed).resolve()
-    except OSError:
-        return claimed
-    if claimed_resolved != discovered.resolve():
-        return claimed
-    return None
-
-
-def _validate_publish_log_exports(project_dir: Path, publish_log: dict) -> list[str]:
-    """Return the publish_log-claimed export_paths that have NO real file on
-    disk, for every entry whose status implies a file was actually produced.
-
-    Confirmed live: a publish_log artifact claimed 5 real export files
-    (teaser cut, platform-specific crops, poster frame) that were never
-    generated — no exports/ directory ever created, zero video-processing
-    tool calls in that stage's trace. Per schemas/artifacts/publish_log.
-    schema.json, "exported" and "draft" are the statuses that imply a real
-    file was written (as opposed to "published"/a remote upload with no
-    local file, "failed", or "pending_review").
-    """
-    missing: list[str] = []
-    for entry in (publish_log or {}).get("entries", []):
-        if not isinstance(entry, dict):
-            continue
-        status = entry.get("status")
-        export_path = entry.get("export_path")
-        if status in ("exported", "draft") and export_path:
-            if not (project_dir / export_path).is_file():
-                missing.append(export_path)
-    return missing
-
-
-# Stage-produces artifact name -> validator that checks its file-backed
-# claims against reality. Generalizes the compose/render_report
-# anti-fabrication check above to any stage whose `produces` declares one of
-# these artifacts, rather than keying off a literal stage name — starting
-# with the concrete publish_log case (see _validate_publish_log_exports).
-_PRODUCES_EXPORT_VALIDATORS = {
-    "publish_log": _validate_publish_log_exports,
-}
-
-
 def _check_render_runtime_consistency(project_dir: Path) -> str | None:
     """Return a failure message if edit_decisions.render_runtime silently
     diverges from the render_runtime locked at proposal
@@ -1738,74 +1641,3 @@ def _check_render_runtime_consistency(project_dir: Path) -> str | None:
         f"justifying the change. Either match the locked runtime ('{locked_runtime}') "
         "or log a proper decision_log entry explaining the override."
     )
-
-
-def _missing_variants(project_dir: Path, options: dict) -> list[str] | None:
-    """For a multi-variant compose job, return the declared A/B model strings
-    that have NO corresponding rendered file — or None if this isn't a
-    multi-variant job, or every declared variant rendered.
-
-    The compose anti-fabrication check (in _run_pipeline_impl, right after
-    _discover_render_url) only requires ANY render file to exist. In a
-    3-variant job where 2 variants render and the 3rd fails, that check alone
-    still passes (a render DID happen) and the stage proceeds as genuinely
-    complete with no signal that a whole variant never rendered. Each
-    variant is expected to land at renders/final_<variant_slug(model)>.mp4 per
-    tool_bridge.py's per-call output-path tagging — the "A/B Variants" prompt
-    section in _run_agent_stage instructs the agent to pass `inputs.variant`
-    as the exact declared model string on every compose call.
-    """
-    variants = [m for m in (options.get("video_model_variants") or []) if m]
-    if len(variants) <= 1:
-        return None
-    renders_dir = project_dir / "renders"
-    missing = [m for m in variants if not (renders_dir / f"final_{variant_slug(m)}.mp4").is_file()]
-    return missing or None
-
-
-def _url_for_render(project_dir: Path, project_name: str, candidate: Path) -> str:
-    rel = candidate.relative_to(project_dir).as_posix()
-    # Route through the storage seam so swapping to object storage later yields
-    # signed URLs without touching this call site.
-    try:
-        from app.interfaces import get_storage
-    except ImportError:
-        # The storage seam module itself isn't importable in this process —
-        # genuinely "no real storage backend available" (e.g. a stripped
-        # module path), not a bug in a configured backend.
-        return f"/media/{project_name}/{rel}"
-    try:
-        return get_storage().url_for(project_name, rel)
-    except Exception as exc:
-        # A genuinely configured (non-local) storage backend raising here is a
-        # real bug (bad credentials, unreachable bucket, ...) that silently
-        # falling back to the local /media/ path would mask — the returned
-        # URL would just 404 with no diagnostic anywhere. Log it so it's
-        # visible, but still fall back so render discovery doesn't hard-fail
-        # the whole job over a URL-formatting problem.
-        logger.warning(
-            "get_storage().url_for(%r, %r) raised %r; falling back to local media path",
-            project_name, rel, exc,
-        )
-        return f"/media/{project_name}/{rel}"
-
-
-def _discover_render_urls(project_dir: Path, project_name: str) -> dict[str, str] | None:
-    """Variant-aware sibling of _discover_render_url.
-
-    An A/B job's compose stage produces renders/final_<slug>.mp4 per variant
-    (tool_bridge.py's `variant` output-path tagging) instead of a single
-    renders/final.mp4. Returns {variant_slug: url} for every renders/final*.mp4
-    found, or None for a normal (non-variant) job where only final.mp4 exists —
-    callers should keep using the singular render_url/preview_render_url in
-    that case, so a non-variant job's behavior is untouched.
-    """
-    renders = sorted((project_dir / "renders").glob("final*.mp4"))
-    if len(renders) <= 1:
-        return None  # 0 or 1 file: not a multi-variant job, nothing plural to report
-    urls: dict[str, str] = {}
-    for path in renders:
-        stem = path.stem  # "final_ltx2-3" -> "ltx2-3"; bare "final" -> ""
-        slug = stem[len("final"):].lstrip("_") or "default"
-        urls[slug] = _url_for_render(project_dir, project_name, path)
-    return urls

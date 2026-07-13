@@ -717,8 +717,14 @@ def test_assets_stage_has_higher_max_turns_and_lower_temperature():
     # shared by every stage regardless of complexity — assets (many
     # generation calls per scene) needs more turns, and structured/
     # schema-writing stages benefit from lower temperature than the
-    # genuinely creative ones.
-    assets = next(s for s in stage_runner.CINEMATIC_STAGES if s["name"] == "assets")
+    # genuinely creative ones. Tuning now lives in _STAGE_TUNING (overlaid
+    # onto the manifest-derived stage dict by _resolve_stages) rather than a
+    # hand-maintained CINEMATIC_STAGES list — assert both the tuning table
+    # itself and its actual threading into _resolve_stages("cinematic").
+    assert stage_runner._STAGE_TUNING[("cinematic", "assets")]["max_turns"] > stage_runner.MAX_TURNS
+    assert stage_runner._STAGE_TUNING[("cinematic", "assets")]["temperature"] < 0.7
+
+    assets = next(s for s in stage_runner._resolve_stages("cinematic") if s["name"] == "assets")
     assert assets["max_turns"] > stage_runner.MAX_TURNS
     assert assets["temperature"] < 0.7
 
@@ -751,8 +757,12 @@ def test_compose_stage_has_higher_max_turns():
     # Regression: compose is at least as tool-call-heavy as "assets" (which
     # already has max_turns=40 with a rationale comment) but stayed at the
     # global default (20) — confirmed live: compose hit the 20-turn ceiling
-    # in a real run.
-    compose = next(s for s in stage_runner.CINEMATIC_STAGES if s["name"] == "compose")
+    # in a real run. See test_assets_stage_has_higher_max_turns_and_lower_temperature
+    # above for why this now reads _STAGE_TUNING / _resolve_stages instead of
+    # the deleted CINEMATIC_STAGES list.
+    assert stage_runner._STAGE_TUNING[("cinematic", "compose")]["max_turns"] > stage_runner.MAX_TURNS
+
+    compose = next(s for s in stage_runner._resolve_stages("cinematic") if s["name"] == "compose")
     assert compose["max_turns"] > stage_runner.MAX_TURNS
 
 
