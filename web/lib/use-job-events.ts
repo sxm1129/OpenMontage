@@ -41,7 +41,10 @@ export function useJobEvents(jobId: string, dispatch: (action: JobLifecycleActio
     const connect = () => {
       if (cancelledRef.current) return null;
       const url = `${SERVER}/jobs/${jobId}/events?lastEventId=${lastSeqRef.current}`;
-      const es = new EventSource(url);
+      // withCredentials: EventSource cannot set custom headers, so when the
+      // backend enforces auth (OM_TEAM_PASSPHRASE set) the om_session cookie
+      // is its only way in. No-op when auth is disabled.
+      const es = new EventSource(url, { withCredentials: true });
       esRef.current = es;
       es.onopen = () => {
         // Connection actually succeeded — reset the backoff so a future,

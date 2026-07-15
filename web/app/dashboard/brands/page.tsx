@@ -5,13 +5,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-// Note: load()/handleSave()/handleDelete() below deliberately keep raw fetch
-// rather than lib/api's apiRequest — their control flow relies on a network
-// failure THROWING so it propagates to the enclosing try/catch (e.g. a failed
-// post-save reload must hit handleSave's catch and keep the form open with
-// its error visible, not fall through to the "close the form" success path).
-// apiRequest never throws, so only the reference-image uploads — which branch
-// on ok explicitly — use it.
+// Everything here goes through lib/api's apiRequest and branches on `ok`
+// explicitly. The previous raw-fetch version only caught NETWORK failures
+// (which throw) — an HTTP-level failure like a 404/422 on the PATCH resolved
+// normally, was never checked, and fell straight through to the "close the
+// form" success path, silently discarding the user's edits (audit 2026-07-15,
+// BUG-12). apiRequest also sends credentials, required once the backend
+// enforces the session token.
 import { SERVER, apiRequest } from "@/lib/api";
 
 type BrandKit = {
@@ -55,9 +55,10 @@ export default function BrandsPage() {
     };
   }
 
-  async function load() {
-    const res = await fetch(`${SERVER}/brands`);
-    if (res.ok) setKits((await res.json()).brand_kits ?? []);
+  async function load(): Promise<boolean> {
+    const res = await apiRequest("/brands");
+    if (res.ok) setKits(res.data.brand_kits ?? []);
+    return res.ok;
   }
 
   // Async fetch: setState happens after await, not synchronously in the effect.
@@ -106,7 +107,9 @@ export default function BrandsPage() {
       body,
     });
     if (!res.ok) {
-      setRefImageError("上传失败，请重试");
+      // Surface the backend's specific reason (file too large / not an
+      // image) instead of a generic retry message that hides it.
+      setRefImageError(`上传失败：${res.detail}`);
     } else {
       setRefImagePreview(`${SERVER}${res.data.reference_image_url}`);
       setRefImageVersion((v) => v + 1);
@@ -126,29 +129,37 @@ export default function BrandsPage() {
     };
     try {
       if (editing) {
-        await fetch(`${SERVER}/brands/${editing.kit_id}`, {
+        const res = await apiRequest(`/brands/${editing.kit_id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
+        if (!res.ok) {
+          // Keep the form open with the user's edits — a 404 (kit deleted
+          // in another tab) or 422 previously fell through to the success
+          // path and silently discarded them.
+          setSaveError(`保存失败：${res.detail}`);
+          return;
+        }
       } else {
-        const createRes = await fetch(`${SERVER}/brands`, {
+        const createRes = await apiRequest("/brands", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        if (createRes.ok && refImageFile) {
+        if (!createRes.ok) {
+          setSaveError(`创建失败：${createRes.detail}`);
+          return;
+        }
+        if (refImageFile) {
           // Immediately follow up with the reference-image upload so the
           // whole thing reads as one atomic "create brand kit with
           // reference image" action to the user, instead of two separate
           // steps they'd otherwise have to discover (create, then re-open
           // to attach an image).
-          const newKit: BrandKit = await createRes.json();
+          const newKit: BrandKit = createRes.data;
           const uploadBody = new FormData();
           uploadBody.append("file", refImageFile);
-          // apiRequest never throws — a network failure comes back as
-          // ok: false, exactly the uploadOk = false this used to hand-roll
-          // with an inner try/catch.
           const uploadRes = await apiRequest(`/brands/${newKit.kit_id}/reference-image`, {
             method: "POST",
             body: uploadBody,
@@ -167,11 +178,14 @@ export default function BrandsPage() {
           }
         }
       }
-      await load();
+      if (!(await load())) {
+        // Saved, but the list refresh failed — keep the form open with an
+        // honest message rather than closing onto a stale list.
+        setSaveError("已保存，但刷新列表失败，请手动刷新页面");
+        return;
+      }
       setCreating(false);
       setEditing(null);
-    } catch {
-      setSaveError("保存失败，请检查网络连接后重试");
     } finally {
       setSaving(false);
     }
@@ -180,12 +194,12 @@ export default function BrandsPage() {
   async function handleDelete(kit_id: string) {
     if (!confirm("确定删除？")) return;
     setListError(null);
-    try {
-      await fetch(`${SERVER}/brands/${kit_id}`, { method: "DELETE" });
-      await load();
-    } catch {
-      setListError("删除失败，请检查网络连接后重试");
+    const res = await apiRequest(`/brands/${kit_id}`, { method: "DELETE" });
+    if (!res.ok) {
+      setListError(`删除失败：${res.detail}`);
+      return;
     }
+    if (!(await load())) setListError("已删除，但刷新列表失败，请手动刷新页面");
   }
 
   return (

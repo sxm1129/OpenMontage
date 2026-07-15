@@ -43,11 +43,14 @@ export default function SettingsPage() {
 
   useEffect(() => {
     async function load() {
+      // credentials: the backend validates the om_session cookie when
+      // OM_TEAM_PASSPHRASE is configured; cross-origin fetch won't send it
+      // without "include" (no-op when auth is disabled).
       const [health, jobs, brands, caps] = await Promise.allSettled([
-        fetch(`${SERVER}/health`).then((r) => r.json() as Promise<HealthData>),
-        fetch(`${SERVER}/jobs`).then((r) => r.json()),
-        fetch(`${SERVER}/brands`).then((r) => r.json()),
-        fetch(`${SERVER}/system/capabilities`).then((r) => r.json()),
+        fetch(`${SERVER}/health`, { credentials: "include" }).then((r) => r.json() as Promise<HealthData>),
+        fetch(`${SERVER}/jobs`, { credentials: "include" }).then((r) => r.json()),
+        fetch(`${SERVER}/brands`, { credentials: "include" }).then((r) => r.json()),
+        fetch(`${SERVER}/system/capabilities`, { credentials: "include" }).then((r) => r.json()),
       ]);
       setInfo({
         serverOk: health.status === "fulfilled" && health.value.status === "ok",

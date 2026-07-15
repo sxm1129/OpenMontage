@@ -3,10 +3,12 @@
 import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.interfaces import get_auth_provider
 from app.routers import jobs, events, health, brands, system, pipelines
 
 OM_ROOT = Path(__file__).parent.parent.parent
@@ -29,6 +31,46 @@ def _cors_origins() -> list[str]:
 
 app = FastAPI(title="OpenMontage Server", version="0.1.0")
 
+
+@app.middleware("http")
+async def require_session_token(request: Request, call_next):
+    """Enforce the shared-session token on every route when auth is configured.
+
+    Before this middleware existed, NO route checked AuthProvider.verify() —
+    job create/delete/approve, artifact overwrite, brand-kit CRUD, and the
+    /media mounts were all reachable unauthenticated by anyone who could
+    reach the port, and the web login page was purely cosmetic. Enforcement
+    is conditional on a passphrase being configured (OM_TEAM_PASSPHRASE):
+    without one this is a local single-user tool and stays zero-config,
+    matching the honest "enforced" flag in interfaces.active_backends().
+
+    Token sources, in order: X-OM-Token header (non-browser clients and
+    cross-host deployments), Authorization: Bearer, and the om_session
+    cookie the web login route sets (which also covers EventSource and
+    <video src> requests that cannot carry custom headers).
+    """
+    auth = get_auth_provider()
+    if not getattr(auth, "enabled", True):
+        return await call_next(request)
+    # OPTIONS preflights carry no credentials by spec; /health stays open for
+    # probes and the web settings page's reachability check.
+    if request.method == "OPTIONS" or request.url.path == "/health":
+        return await call_next(request)
+    token = request.headers.get("x-om-token") or request.cookies.get("om_session")
+    if not token:
+        authorization = request.headers.get("authorization", "")
+        if authorization.lower().startswith("bearer "):
+            token = authorization[7:]
+    if not auth.verify(token):
+        return JSONResponse(
+            {"detail": "Unauthorized: missing or invalid session token"},
+            status_code=401,
+        )
+    return await call_next(request)
+
+
+# Added AFTER the auth middleware so CORS is the OUTER layer — it must answer
+# preflight OPTIONS (which carry no credentials) before auth ever runs.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),

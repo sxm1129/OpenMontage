@@ -119,6 +119,7 @@ export default function NewProjectPage() {
       // network-error message carries a "创建失败：" prefix.
       const res = await fetch(`${SERVER}/jobs`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           project_name: form.projectName || form.brandName.replace(/\s+/g, "-"),

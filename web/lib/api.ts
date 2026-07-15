@@ -32,7 +32,11 @@ export type ApiResult =
 export async function apiRequest(path: string, init?: RequestInit): Promise<ApiResult> {
   let res: Response;
   try {
-    res = await fetch(`${SERVER}${path}`, init);
+    // credentials: "include" — the backend is a different origin (another
+    // port), and when OM_TEAM_PASSPHRASE is configured its auth middleware
+    // validates the om_session cookie; without this the cookie is never sent
+    // cross-origin and every call 401s. A no-op when auth is disabled.
+    res = await fetch(`${SERVER}${path}`, { credentials: "include", ...init });
   } catch {
     return { ok: false, status: 0, detail: "网络错误，请检查后端是否可访问" };
   }

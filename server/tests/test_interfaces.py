@@ -79,10 +79,14 @@ def test_local_storage_url_and_paths(tmp_path):
 
 def test_passphrase_auth(monkeypatch):
     auth = PassphraseAuth(passphrase="secret")
-    assert auth.login({"passphrase": "secret"}) == "authenticated"
+    token = auth.login({"passphrase": "secret"})
+    # The session token is HMAC-derived from the passphrase (see auth.py
+    # _TOKEN_CONTEXT) — the old forgeable constant must be gone for good.
+    assert token and token != "authenticated"
     assert auth.login({"passphrase": "wrong"}) is None
     assert auth.login({}) is None
-    assert auth.verify("authenticated") is True
+    assert auth.verify(token) is True
+    assert auth.verify("authenticated") is False
     assert auth.verify("nope") is False
 
     # empty configured passphrase must never authenticate

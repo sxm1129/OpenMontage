@@ -73,13 +73,10 @@ def active_backends() -> dict:
             "active": get_auth_provider().name,
             "available": sorted(_AUTH),
             "planned": _AUTH_ROADMAP,
-            # Unlike storage/queue (genuinely used for every operation),
-            # nothing in server/app actually calls AuthProvider.verify() —
-            # no route has a Depends() checking it. Reporting "active" the
-            # same way as the other two seams read as "requests are
-            # authenticated," which was false. This is a deliberate choice
-            # for a local single-user tool, not an oversight to silently
-            # paper over — surface it honestly instead.
-            "enforced": False,
+            # True only when the provider is actually configured to enforce
+            # (main.py's require_session_token middleware checks every route
+            # then). Without a passphrase this stays False — a local
+            # single-user tool, surfaced honestly rather than papered over.
+            "enforced": getattr(get_auth_provider(), "enabled", False),
         },
     }
