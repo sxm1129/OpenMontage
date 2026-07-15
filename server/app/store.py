@@ -290,6 +290,24 @@ class JobStore:
 
     # ---- Approval gate ----
 
+    def begin_approval_gate(self, job_id: str) -> None:
+        """Reset gate state before a new gate opens (call BEFORE flipping the
+        job to awaiting_approval).
+
+        A decision landing exactly at a previous gate's timeout boundary can
+        leave a stale result and/or a set event behind — set_approval's
+        deferred call_soon_threadsafe(ev.set) may even fire AFTER the timeout
+        path's cleanup ran. Consumed here, that stale state would resolve the
+        NEXT gate instantly with the dead gate's answer. Clearing before the
+        status flips to awaiting_approval is race-free: set_approval rejects
+        every decision until the flip, so there is nothing legitimate to wipe.
+        """
+        with self._lock:
+            self._approval_results.pop(job_id, None)
+        ev = self._approval_events.get(job_id)
+        if ev:
+            ev.clear()
+
     def set_approval(self, job_id: str, action: str, feedback: str) -> bool:
         """Record the human's approve/reject decision for a job's approval gate.
 
@@ -328,6 +346,15 @@ class JobStore:
         try:
             await asyncio.wait_for(ev.wait(), timeout=timeout)
         except asyncio.TimeoutError:
+            # A decision that lands in the instant between the timeout firing
+            # and this cleanup belongs to THIS (now rejected-by-timeout) gate.
+            # Without clearing the event and popping the result, they stayed
+            # behind and the job's NEXT gate consumed them immediately —
+            # silently approving a different question than the one the human
+            # answered.
+            ev.clear()
+            with self._lock:
+                self._approval_results.pop(job_id, None)
             return {"action": "reject", "feedback": "Approval timed out"}
         ev.clear()
         with self._lock:

@@ -155,10 +155,18 @@ export function jobLifecycleReducer(
 }
 
 function applySseEvent(state: JobLifecycleState, ev: SseEvent): JobLifecycleState {
+  // Only a REAL pipeline stage may become currentStage. Gate events carry
+  // pseudo-stages too — the budget gate's awaiting_approval/job_failed events
+  // arrive with stage:"budget", which is deliberately NOT in the job's stage
+  // list (stage_runner passes set_current_stage=False for the same reason).
+  // Unconditionally trusting ev.stage made stages.indexOf(currentStage) -1,
+  // dropping the progress bar to 0% and deactivating the stepper.
+  const stageIsReal =
+    ev.stage != null && (state.stages.includes(ev.stage) || ev.type === "stage_started");
   const next: JobLifecycleState = {
     ...state,
     events: [...state.events, ev],
-    currentStage: ev.stage ? ev.stage : state.currentStage,
+    currentStage: stageIsReal ? (ev.stage as string) : state.currentStage,
   };
   switch (ev.type) {
     case "job_started":

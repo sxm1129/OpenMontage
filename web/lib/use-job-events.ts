@@ -31,15 +31,33 @@ export function useJobEvents(jobId: string, dispatch: (action: JobLifecycleActio
   const lastSeqRef = useRef(-1);
   const lastEventTypeRef = useRef<string | null>(null); // type of the most recently processed event
   const doneRef = useRef(false); // job reached a terminal state
-  const cancelledRef = useRef(false); // component unmounted — stop reconnecting
   const connectRef = useRef<(() => EventSource | null) | null>(null);
   const esRef = useRef<EventSource | null>(null); // the currently live connection, if any
   const reconnectDelayRef = useRef(SSE_RECONNECT_BASE_MS); // current backoff wait, doubles per failed attempt
 
   useEffect(() => {
-    cancelledRef.current = false;
+    // All of these refs are SHARED across effect runs of the same hook
+    // instance, and the App Router re-renders the same [jobId] page component
+    // when navigating job A → job B — the effect re-runs WITHOUT an unmount.
+    // Each run therefore resets the per-job state: without this, job B
+    // resumed from job A's lastEventId (skipping B's early events) and a
+    // completed A left doneRef=true so B never reconnected after a blip.
+    doneRef.current = false;
+    lastSeqRef.current = -1;
+    lastEventTypeRef.current = null;
+    // Effect-generation flag: a backoff setTimeout captured by job A's
+    // closure must not revive A's stream after the effect re-ran for job B.
+    // A shared "cancelled" ref cannot express this — B's run resets it to
+    // false, re-arming A's pending timer (audit 2026-07-15, BUG-10). Only a
+    // per-generation local survives correctly.
+    let cancelledThisGeneration = false;
+    let pendingRetry: ReturnType<typeof setTimeout> | null = null;
     const connect = () => {
-      if (cancelledRef.current) return null;
+      if (cancelledThisGeneration) return null;
+      // A manual reconnect (or an overlapping generation) may find a live
+      // connection — close it before overwriting esRef, or it leaks and
+      // keeps dispatching in the background.
+      esRef.current?.close();
       const url = `${SERVER}/jobs/${jobId}/events?lastEventId=${lastSeqRef.current}`;
       // withCredentials: EventSource cannot set custom headers, so when the
       // backend enforces auth (OM_TEAM_PASSPHRASE set) the om_session cookie
@@ -76,13 +94,14 @@ export function useJobEvents(jobId: string, dispatch: (action: JobLifecycleActio
           doneRef.current = true;
           return;
         }
-        // Reconnect only while the job is live and the view is still mounted.
-        // (Uses refs, not any captured React state, which would be stale here.)
-        if (!doneRef.current && !cancelledRef.current) {
+        // Reconnect only while the job is live and this effect generation is
+        // still current (the generation flag is never reset by a later
+        // effect run — see above).
+        if (!doneRef.current && !cancelledThisGeneration) {
           const delay = reconnectDelayRef.current;
           reconnectDelayRef.current = Math.min(delay * 2, SSE_RECONNECT_MAX_MS);
-          setTimeout(() => {
-            if (!cancelledRef.current && !doneRef.current) connect();
+          pendingRetry = setTimeout(() => {
+            if (!cancelledThisGeneration && !doneRef.current) connect();
           }, delay);
         }
       };
@@ -91,7 +110,8 @@ export function useJobEvents(jobId: string, dispatch: (action: JobLifecycleActio
     connectRef.current = connect;
     connect();
     return () => {
-      cancelledRef.current = true;
+      cancelledThisGeneration = true;
+      if (pendingRetry) clearTimeout(pendingRetry);
       esRef.current?.close();
     };
   }, [jobId, dispatch]);

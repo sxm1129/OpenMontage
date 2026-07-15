@@ -347,6 +347,10 @@ def _pause_for_approval(
     `preview` is always included, even when None, matching the historical
     stage-boundary emit shape.
     """
+    # Clear any stale decision/event left by a previous gate's timeout race
+    # BEFORE the status flip makes new decisions acceptable (see
+    # JobStore.begin_approval_gate).
+    job_store.begin_approval_gate(job_id)
     job_store.update(job_id, status="awaiting_approval")
     event: dict[str, Any] = {"type": "awaiting_approval", "stage": stage}
     if gate is not None:

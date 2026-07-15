@@ -17,7 +17,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from backlot.state import PROJECTS_DIR, REPO_ROOT, list_projects, load_board_state, summarize_project
+from backlot.state import (
+    LIVE_WINDOW_SECONDS,
+    PROJECTS_DIR,
+    REPO_ROOT,
+    load_board_state,
+    summarize_project,
+)
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 THUMB_CACHE_DIR = REPO_ROOT / ".backlot" / "thumbs"
@@ -63,8 +69,16 @@ class ChangeHub:
 hub = ChangeHub()
 
 # Library summaries are expensive to derive (full state parse per project);
-# cache per project and invalidate from the watcher.
-_summary_cache: dict[str, dict] = {}
+# cache per project and invalidate from the watcher. Entries are
+# (fetched_at, summary): the timestamp powers the no-watcher TTL below.
+_summary_cache: dict[str, tuple[float, dict]] = {}
+
+# Set once _watch_projects actually starts watching. When watchfiles is not
+# installed the cache has NO invalidation signal — without a TTL fallback the
+# library went permanently stale after its first fetch (the old "board still
+# works via manual refresh" comment was only true for the project page).
+_watcher_active = False
+_NO_WATCHER_TTL_SECONDS = 5.0
 
 
 def _invalidate_summary(project_id: str) -> None:
@@ -74,16 +88,21 @@ def _invalidate_summary(project_id: str) -> None:
 def _cached_summaries() -> list[dict]:
     if not PROJECTS_DIR.is_dir():
         return []
+    now = time.time()
     summaries = []
+    seen: set[str] = set()
     for entry in sorted(PROJECTS_DIR.iterdir()):
         if not entry.is_dir() or entry.name.startswith(("_", ".")):
             continue
-        cached = _summary_cache.get(entry.name)
-        if cached is None:
+        seen.add(entry.name)
+        hit = _summary_cache.get(entry.name)
+        if hit is not None and not _watcher_active and now - hit[0] > _NO_WATCHER_TTL_SECONDS:
+            hit = None
+        if hit is None:
             try:
-                cached = summarize_project(entry)
+                summary = summarize_project(entry)
             except Exception:
-                cached = {
+                summary = {
                     "project_id": entry.name, "title": entry.name,
                     "pipeline_type": "unknown", "has_pipeline_state": False,
                     "poster": None, "live": False, "last_activity": 0,
@@ -91,8 +110,23 @@ def _cached_summaries() -> list[dict]:
                     "stage_states": [], "completed_count": 0,
                     "render_count": 0, "scene_count": 0, "error": "unreadable",
                 }
-            _summary_cache[entry.name] = cached
-        summaries.append(cached)
+            _summary_cache[entry.name] = (now, summary)
+        else:
+            summary = hit[1]
+        # `live` is TIME-derived (activity within the last LIVE_WINDOW), but
+        # the cache is only invalidated by FILE changes — a project that
+        # stops writing never generates another change event, so a cached
+        # live=True stayed live (and kept its live-first sort slot) forever.
+        # Recompute it from the cached last_activity at request time.
+        last_activity = summary.get("last_activity") or 0
+        summaries.append({
+            **summary,
+            "live": bool(last_activity and (now - last_activity) < LIVE_WINDOW_SECONDS),
+        })
+    # Deleted projects: their directory no longer appears above, so their
+    # cache entries would otherwise linger unboundedly.
+    for gone in set(_summary_cache) - seen:
+        _summary_cache.pop(gone, None)
     summaries.sort(key=lambda s: (not s["live"], -(s["last_activity"] or 0)))
     return summaries
 
@@ -120,12 +154,16 @@ def _project_of_change(path_str: str) -> Optional[str]:
 
 async def _watch_projects() -> None:
     """Background task: watch projects/ and publish debounced changes."""
+    global _watcher_active
     try:
         from watchfiles import awatch
     except ImportError:
-        return  # watcher unavailable → board still works via manual refresh
+        # Watcher unavailable → the summary cache falls back to its short
+        # TTL (see _cached_summaries) and the board works via refetch.
+        return
     if not PROJECTS_DIR.is_dir():
         return
+    _watcher_active = True
     async for changes in awatch(PROJECTS_DIR, recursive=True, step=400):
         touched: set[str] = set()
         for _change, path_str in changes:

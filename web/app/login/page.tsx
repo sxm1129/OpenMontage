@@ -25,8 +25,13 @@ function LoginForm() {
     });
 
     if (res.ok) {
+      // Only follow same-origin paths — `from` is attacker-controllable via
+      // the URL, and an absolute ("https://evil.example") or scheme-relative
+      // ("//evil.example") value would make a successful login navigate
+      // off-site (open-redirect phishing primitive).
       const from = params.get("from") || "/";
-      router.push(from);
+      const target = from.startsWith("/") && !from.startsWith("//") ? from : "/";
+      router.push(target);
     } else {
       setError("口令错误，请重试");
       setLoading(false);
