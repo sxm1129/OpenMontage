@@ -17,14 +17,7 @@ const { fontFamily: playfairItalicBase } = loadPlayfair("italic", {
 });
 const playfairItalic = withCjkFallback(playfairItalicBase);
 
-function resolveAsset(src: string): string {
-  if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("data:")) return src;
-  const clean = src.replace(/^file:\/\/\/?/, "");
-  if (clean.startsWith("/") || /^[A-Za-z]:[\\/]/.test(clean)) {
-    return `file:///${clean.replace(/\\/g, "/")}`;
-  }
-  return staticFile(clean);
-}
+import { resolveAsset } from "./lib/resolveAsset";
 
 export interface Lyric {
   text: string;
@@ -33,6 +26,9 @@ export interface Lyric {
 }
 
 export interface LyricOverlayProps {
+  // Index signature required by Remotion's <Composition> prop typing —
+  // same pattern as TalkingHeadProps.
+  [key: string]: unknown;
   videoSrc: string;
   lyrics: Lyric[];
   bottomY?: number; // 0..1, vertical center of subtitle band

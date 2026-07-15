@@ -12,20 +12,7 @@ import {
 } from "remotion";
 import { loadFont } from "@remotion/google-fonts/SpaceGrotesk";
 
-// Resolve asset path — handle URLs, absolute paths (Windows/Unix), and public/ relative paths
-function resolveAsset(src: string): string {
-  if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("data:")) {
-    return src;
-  }
-  // Strip any file:// prefix
-  const clean = src.replace(/^file:\/\/\/?/, "");
-  // Absolute paths (Unix: /foo, Windows: C:\foo or C:/foo) — convert to file:// URI
-  // staticFile() only accepts relative paths within public/, so absolute paths must bypass it
-  if (clean.startsWith("/") || /^[A-Za-z]:[\\/]/.test(clean)) {
-    return `file:///${clean.replace(/\\/g, "/")}`;
-  }
-  return staticFile(clean);
-}
+import { resolveAsset } from "./lib/resolveAsset";
 import { TextCard } from "./components/TextCard";
 import { StatCard } from "./components/StatCard";
 import { CalloutBox } from "./components/CalloutBox";
@@ -732,7 +719,10 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
 // ---------------------------------------------------------------------------
 
 const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
-  if (overlay.type === "section_title") {
+  // text-bearing overlay types render nothing when text is missing — a
+  // malformed overlay must not reach a component whose `title`/`stat` prop
+  // is required (it rendered "undefined" on screen and failed typecheck).
+  if (overlay.type === "section_title" && overlay.text) {
     return (
       <SectionTitle
         title={overlay.text}
@@ -742,7 +732,7 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
       />
     );
   }
-  if (overlay.type === "stat_reveal") {
+  if (overlay.type === "stat_reveal" && overlay.text) {
     return (
       <StatReveal
         stat={overlay.text}
@@ -752,7 +742,7 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
       />
     );
   }
-  if (overlay.type === "hero_title") {
+  if (overlay.type === "hero_title" && overlay.text) {
     return <HeroTitle title={overlay.text} subtitle={overlay.subtitle} />;
   }
   if (overlay.type === "provider_chip" && overlay.providers) {

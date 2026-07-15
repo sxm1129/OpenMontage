@@ -18,6 +18,7 @@ import { KPIGrid } from "./components/charts/KPIGrid";
 import { HeroTitle } from "./components/HeroTitle";
 import { SectionTitle } from "./components/SectionTitle";
 import { StatReveal } from "./components/StatReveal";
+import { resolveAsset } from "./lib/resolveAsset";
 
 // ---------------------------------------------------------------------------
 // Overlay types for talking-head video
@@ -316,9 +317,12 @@ export const TalkingHead: React.FC<TalkingHeadProps> = ({
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#000" }}>
-      {/* Layer 1: Video background */}
+      {/* Layer 1: Video background. videoSrc goes through resolveAsset like
+          every other composition's sources — it used to be passed raw, so a
+          file:// URI or absolute path from video_compose.py broke here while
+          working everywhere else. */}
       <OffthreadVideo
-        src={videoSrc}
+        src={resolveAsset(videoSrc)}
         style={{ width: "100%", height: "100%", objectFit: "cover" }}
       />
 

@@ -16,6 +16,9 @@ export interface WordCaption {
 }
 
 interface CaptionOverlayProps {
+  // Index signature required by Remotion's <Composition> prop typing —
+  // same pattern as TalkingHeadProps.
+  [key: string]: unknown;
   words: WordCaption[];
   // How many words to show at once in a "page"
   wordsPerPage?: number;

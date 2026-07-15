@@ -85,16 +85,7 @@ interface ScreenshotSceneProps {
 
 // ---------- Helpers ----------
 
-function resolveAsset(src: string): string {
-  if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("data:")) {
-    return src;
-  }
-  const clean = src.replace(/^file:\/\/\/?/, "");
-  if (clean.startsWith("/") || /^[A-Za-z]:[\\/]/.test(clean)) {
-    return `file:///${clean.replace(/\\/g, "/")}`;
-  }
-  return staticFile(clean);
-}
+import { resolveAsset } from "../lib/resolveAsset";
 
 /** Compute the rendered bounding box of the backdrop inside a canvas,
  *  using object-fit: contain semantics. Returns pixel offsets/sizes. */

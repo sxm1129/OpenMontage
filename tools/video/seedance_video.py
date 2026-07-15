@@ -267,18 +267,10 @@ class SeedanceVideo(BaseTool):
             status_url = queue_data["status_url"]
             response_url = queue_data["response_url"]
 
-            while True:
-                time.sleep(5)
-                status_resp = requests.get(status_url, headers=headers, timeout=15)
-                status_resp.raise_for_status()
-                status = status_resp.json().get("status", "UNKNOWN")
-                if status == "COMPLETED":
-                    break
-                if status in ("FAILED", "CANCELLED"):
-                    return ToolResult(
-                        success=False,
-                        error=f"Seedance 2.0 video generation {status.lower()}",
-                    )
+            # Bounded poll — raises on failure/timeout and is reported
+            # through the enclosing except like every other error.
+            from tools.video._shared import poll_fal_queue
+            poll_fal_queue(status_url, headers, provider="Seedance 2.0")
 
             result_resp = requests.get(response_url, headers=headers, timeout=30)
             result_resp.raise_for_status()

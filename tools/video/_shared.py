@@ -415,6 +415,43 @@ def poll_heygen(execution_id: str, api_key: str, timeout: int = 600) -> str:
     raise TimeoutError(f"HeyGen execution {execution_id} timed out after {timeout}s")
 
 
+def poll_fal_queue(
+    status_url: str,
+    headers: dict,
+    *,
+    provider: str = "fal.ai",
+    timeout: int = 600,
+) -> None:
+    """Poll a fal.ai queue status URL until COMPLETED, with a hard deadline.
+
+    Returns normally on COMPLETED; raises RuntimeError on FAILED/CANCELLED
+    and TimeoutError past `timeout`. The deadline is not optional: during
+    provider incidents the queue API returns 200 with a non-terminal status
+    (IN_QUEUE/IN_PROGRESS) indefinitely, and the previous per-tool
+    `while True` loops hung the calling pipeline thread forever — there is
+    no timeout wrapper above tool.execute(). Mirrors poll_heygen's
+    deadline + gentle backoff.
+    """
+    import requests
+
+    deadline = time.time() + timeout
+    interval = 5.0
+    while time.time() < deadline:
+        time.sleep(min(interval, max(0.0, deadline - time.time())))
+        interval = min(interval * 1.2, 30.0)
+        status_resp = requests.get(status_url, headers=headers, timeout=15)
+        status_resp.raise_for_status()
+        status = status_resp.json().get("status", "UNKNOWN")
+        if status == "COMPLETED":
+            return
+        if status in ("FAILED", "CANCELLED"):
+            raise RuntimeError(f"{provider} queue job {status.lower()}")
+    raise TimeoutError(
+        f"{provider} queue job still not finished after {timeout}s — "
+        f"giving up instead of hanging the pipeline (status_url={status_url})"
+    )
+
+
 def upload_image_fal(image_path: str) -> str:
     """Upload a local image to fal.ai storage and return a public URL."""
     import requests

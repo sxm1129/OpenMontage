@@ -22,6 +22,9 @@ const { fontFamily: playfairDisplay } = loadFont("normal", {
 const fontFamily = withCjkFallback(playfairDisplay);
 
 export interface TitledVideoProps {
+  // Index signature required by Remotion's <Composition> prop typing —
+  // same pattern as TalkingHeadProps.
+  [key: string]: unknown;
   videoSrc: string;
   tagline: string;
   // When the tagline starts animating in, in seconds from the start of the video.
@@ -36,22 +39,7 @@ export interface TitledVideoProps {
   accentColor?: string;
 }
 
-// Resolve asset path — handle URLs, absolute paths, and public/ relative paths.
-// Mirrors the helper in Explainer.tsx so absolute Windows/Unix paths work.
-function resolveAsset(src: string): string {
-  if (
-    src.startsWith("http://") ||
-    src.startsWith("https://") ||
-    src.startsWith("data:")
-  ) {
-    return src;
-  }
-  const clean = src.replace(/^file:\/\/\/?/, "");
-  if (clean.startsWith("/") || /^[A-Za-z]:[\\/]/.test(clean)) {
-    return `file:///${clean.replace(/\\/g, "/")}`;
-  }
-  return staticFile(clean);
-}
+import { resolveAsset } from "./lib/resolveAsset";
 
 // ---------------------------------------------------------------------------
 // EditorialTagline — big bold serif, upper-third, drawn underline, warm glow.

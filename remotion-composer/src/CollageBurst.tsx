@@ -25,14 +25,7 @@ const { fontFamily: playfairItalicBase } = loadPlayfair("italic", {
 });
 const playfairItalic = withCjkFallback(playfairItalicBase);
 
-function resolveAsset(src: string): string {
-  if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("data:")) return src;
-  const clean = src.replace(/^file:\/\/\/?/, "");
-  if (clean.startsWith("/") || /^[A-Za-z]:[\\/]/.test(clean)) {
-    return `file:///${clean.replace(/\\/g, "/")}`;
-  }
-  return staticFile(clean);
-}
+import { resolveAsset } from "./lib/resolveAsset";
 
 export type CollageTransition =
   | "pop"
@@ -59,6 +52,9 @@ export interface CollageClip {
 }
 
 export interface CollageBurstProps {
+  // Index signature required by Remotion's <Composition> prop typing —
+  // same pattern as TalkingHeadProps.
+  [key: string]: unknown;
   backgroundSrc: string;
   backgroundInSeconds?: number;
   curtainStartSeconds: number;

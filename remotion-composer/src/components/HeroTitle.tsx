@@ -8,6 +8,9 @@ import {
 import { withCjkFallback } from "../fonts";
 
 interface HeroTitleProps {
+  // Index signature required by Remotion's <Composition> prop typing —
+  // same pattern as TalkingHeadProps.
+  [key: string]: unknown;
   title: string;
   subtitle?: string;
 }

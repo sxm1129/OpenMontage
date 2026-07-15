@@ -9,21 +9,7 @@ import {
 } from "remotion";
 import { ParticleOverlay, type ParticleType } from "./ParticleOverlay";
 
-/**
- * Resolve asset path — use staticFile() for local paths, passthrough URLs.
- * Duplicated from Explainer.tsx to keep the component self-contained.
- */
-function resolveAsset(src: string): string {
-  if (
-    src.startsWith("http://") ||
-    src.startsWith("https://") ||
-    src.startsWith("data:")
-  ) {
-    return src;
-  }
-  const clean = src.replace(/^file:\/\/\/?/, "");
-  return staticFile(clean);
-}
+import { resolveAsset } from "../lib/resolveAsset";
 
 // ---------------------------------------------------------------------------
 // Types

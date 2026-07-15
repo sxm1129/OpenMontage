@@ -72,6 +72,32 @@ jobs:
         working-directory: server
         run: python -m pytest
 
+  composer:
+    name: Remotion composer (types)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: remotion-composer
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: remotion-composer/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The composer had no gate at all — ~15 type errors shipped unnoticed
+      # (audit 2026-07-15, BUG-8). Keep `npm run typecheck` green.
+      - name: Type-check
+        run: npm run typecheck
+
   web:
     name: Web (lint · types · tests · build)
     runs-on: ubuntu-latest

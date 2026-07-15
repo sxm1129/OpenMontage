@@ -11,6 +11,9 @@ import {
 import { withCjkFallback } from "../fonts";
 
 export interface ProductRevealProps {
+  // Index signature required by Remotion's <Composition> prop typing —
+  // same pattern as TalkingHeadProps.
+  [key: string]: unknown;
   productImage: string;
   productName: string;
   price: string;

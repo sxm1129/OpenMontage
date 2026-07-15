@@ -190,8 +190,17 @@ class SeedanceReplicate(BaseTool):
             pred = submit.json()
 
             # Poll until completed (Replicate may return the result synchronously
-            # when Prefer: wait is honored, but fall back to polling).
+            # when Prefer: wait is honored, but fall back to polling). Bounded:
+            # a prediction stuck in "processing" during a provider incident
+            # would otherwise hang the pipeline thread forever.
+            deadline = time.time() + 600
             while pred.get("status") in ("starting", "processing"):
+                if time.time() >= deadline:
+                    return ToolResult(
+                        success=False,
+                        error="Replicate Seedance 2.0 prediction still not finished "
+                              "after 600s — giving up instead of hanging the pipeline",
+                    )
                 time.sleep(3)
                 get_url = pred.get("urls", {}).get("get")
                 if not get_url:

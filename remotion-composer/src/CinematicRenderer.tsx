@@ -24,25 +24,7 @@ function isImageSrc(src: string): boolean {
   return /\.(png|jpe?g|webp|gif|bmp)(\?.*)?$/i.test(src);
 }
 
-function resolveAsset(src: string): string {
-  if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("data:")) {
-    return src;
-  }
-  const clean = src.replace(/^file:\/\/\/?/, "");
-  // POSIX absolute paths already carry their own leading slash ("/Users/...") —
-  // prepending another "file:///" produces an invalid 4-slash URI
-  // ("file:////Users/...") that Remotion's asset downloader rejects outright
-  // ("Can only download URLs starting with http:// or https://"). Only
-  // Windows drive-letter paths ("C:/...") need the extra slash. Mirrors the
-  // equivalent POSIX-vs-Windows branch in video_compose.py's _remotion_render.
-  if (clean.startsWith("/")) {
-    return `file://${clean.replace(/\\/g, "/")}`;
-  }
-  if (/^[A-Za-z]:[/\\]/.test(clean)) {
-    return `file:///${clean.replace(/\\/g, "/")}`;
-  }
-  return staticFile(clean);
-}
+import { resolveAsset } from "./lib/resolveAsset";
 import { CinematicRendererProps, CinematicTone, CinematicVideoScene } from "./cinematic/types";
 import { CaptionOverlay } from "./components/CaptionOverlay";
 import { withCjkFallback } from "./fonts";
