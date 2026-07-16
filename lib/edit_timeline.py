@@ -90,3 +90,47 @@ def validate_edit_timeline(
             ),
         },
     }
+
+
+def beat_alignment_report(
+    cuts: list[dict[str, Any]],
+    beats: list[float],
+    tolerance_ms: float = 80.0,
+) -> dict[str, Any]:
+    """How well cut points land on the music's beat grid (卡点, Wave 3 item 15).
+
+    Compares every base-layer cut's in_seconds against the nearest beat from
+    beat_grid's output (edit_decisions.music.beats). ±80 ms is the perceptual
+    "on the beat" window. Advisory — the edit director decides which cuts
+    should snap (a narration-led cut may deliberately ignore the grid).
+    """
+    if not beats:
+        return {"checked": 0, "on_beat": 0, "off_beat": [], "alignment_ratio": None}
+    sorted_beats = sorted(beats)
+    tolerance = tolerance_ms / 1000.0
+    off_beat: list[dict[str, Any]] = []
+    checked = 0
+    for cut in cuts:
+        if cut.get("layer"):
+            continue
+        at = float(cut.get("in_seconds", 0))
+        if at <= 0:
+            continue  # the opening cut has no boundary to sync
+        checked += 1
+        nearest = min(sorted_beats, key=lambda b: abs(b - at))
+        delta = at - nearest
+        if abs(delta) > tolerance:
+            off_beat.append({
+                "id": cut.get("id", "?"),
+                "at_seconds": round(at, 3),
+                "nearest_beat": round(nearest, 3),
+                "delta_ms": round(delta * 1000, 1),
+            })
+    on_beat = checked - len(off_beat)
+    return {
+        "checked": checked,
+        "on_beat": on_beat,
+        "off_beat": off_beat,
+        "alignment_ratio": round(on_beat / checked, 3) if checked else None,
+        "tolerance_ms": tolerance_ms,
+    }

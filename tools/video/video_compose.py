@@ -527,15 +527,21 @@ class VideoCompose(BaseTool):
                 speed = cut.get("speed", 1.0)
 
                 if self._is_image(source):
-                    return ToolResult(
-                        success=False,
-                        error=(
-                            f"Still image '{source.name}' in cuts. "
-                            "Use operation='render' (auto-routes to Remotion) "
-                            "or operation='remotion_render' for compositions "
-                            "with images, animations, or component scenes."
-                        ),
+                    # Eased zoompan Ken Burns segment (Wave 3, M6). The
+                    # "degraded FFmpeg render (still images → Ken Burns)"
+                    # this tool advertised never existed — stills were
+                    # rejected outright, forcing Remotion even for a plain
+                    # fallback render. Remotion remains the preferred route
+                    # for image-led compositions; this keeps the ffmpeg
+                    # fallback honest.
+                    err = self._encode_kenburns_segment(
+                        source, seg_path, duration, cut,
+                        target_w, target_h, fit_mode, codec, crf, preset,
                     )
+                    if err is not None:
+                        return err
+                    temp_segments.append(seg_path)
+                    continue
                 else:
                     # Video source: trim to segment.
                     #
@@ -2562,6 +2568,90 @@ class VideoCompose(BaseTool):
         )
 
         return final_review
+
+    def _encode_kenburns_segment(
+        self,
+        source: Path,
+        seg_path: Path,
+        duration: float,
+        cut: dict[str, Any],
+        target_w: int,
+        target_h: int,
+        fit_mode: str,
+        codec: str,
+        crf: int,
+        preset: str,
+    ) -> ToolResult | None:
+        """Encode a still image into an eased Ken Burns video segment.
+
+        Returns None on success, or a failed ToolResult. Progress is
+        smoothstep-eased (p²(3-2p)) — linear zoompan is the slideshow tell.
+        The image is upscaled 2× before zoompan to avoid its integer-step
+        jitter. Output stream layout matches the video segments exactly
+        (30fps yuv420p bt709 + 48kHz stereo silent audio) so concat-copy
+        stays safe.
+        """
+        frames = max(1, int(round(duration * 30)))
+        anim = str(cut.get("animation") or "ken-burns").replace("_", "-")
+        p = f"(on/{frames})"
+        eased = f"({p}*{p}*(3-2*{p}))"
+
+        if anim == "zoom-out":
+            z_expr = f"1.18-0.18*{eased}"
+        elif anim in ("static", "none"):
+            z_expr = "1.02"
+        else:
+            # zoom-in / ken-burns / pans all get the gentle eased push-in;
+            # ken-burns adds a slight diagonal drift via the center offsets.
+            z_expr = f"1+0.18*{eased}"
+
+        x_expr = "iw/2-(iw/zoom/2)"
+        y_expr = "ih/2-(ih/zoom/2)"
+        if anim in ("ken-burns", "ken-burns-slow-zoom", "pan-left"):
+            x_expr = f"iw/2-(iw/zoom/2)-{eased}*iw*0.015"
+            y_expr = f"ih/2-(ih/zoom/2)-{eased}*ih*0.01"
+        elif anim == "pan-right":
+            x_expr = f"iw/2-(iw/zoom/2)+{eased}*iw*0.015"
+
+        # Pre-scale to cover 2× the target box (jitter headroom), then let
+        # zoompan render the final size.
+        if fit_mode == "cover":
+            pre = (
+                f"scale={target_w * 2}:{target_h * 2}:force_original_aspect_ratio=increase,"
+                f"crop={target_w * 2}:{target_h * 2}"
+            )
+        else:
+            pre = (
+                f"scale={target_w * 2}:{target_h * 2}:force_original_aspect_ratio=decrease,"
+                f"pad={target_w * 2}:{target_h * 2}:(ow-iw)/2:(oh-ih)/2:color=black"
+            )
+        vf = (
+            f"{pre},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
+            f":d={frames}:s={target_w}x{target_h}:fps=30,setsar=1"
+        )
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(source),
+            "-f", "lavfi", "-t", str(duration),
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-map", "0:v", "-map", "1:a",
+            "-filter:v", vf,
+            "-c:v", codec, "-crf", str(crf), "-preset", preset,
+            "-pix_fmt", "yuv420p",
+            *self._COLOR_TAG_FLAGS,
+            "-r", "30",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-shortest",
+            str(seg_path),
+        ]
+        self.run_command(cmd)
+        if not seg_path.exists():
+            return ToolResult(
+                success=False,
+                error=f"Ken Burns segment encode produced no output for {source.name}",
+            )
+        return None
 
     def _extract_poster(self, inputs: dict[str, Any]) -> ToolResult:
         """Extract a poster/thumbnail frame from a rendered video.

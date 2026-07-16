@@ -89,6 +89,18 @@ class VideoStitch(BaseTool):
                 "default": "cut",
                 "description": "Transition type: cut (default), crossfade, or fade (fade-through-black)",
             },
+            "transitions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Per-boundary transition list (length = clips - 1) — takes "
+                    "priority over the global `transition`. Editorial names are "
+                    "mapped to ffmpeg xfade types: dissolve/crossfade, fade "
+                    "(through black), fadewhite, wipe-left/right/up/down, "
+                    "slide-left/right/up/down, circle-open/close, zoom, "
+                    "pixelize, radial. 'cut' gives a near-instant boundary."
+                ),
+            },
             "transition_duration": {
                 "type": "number",
                 "minimum": 0.1,
@@ -516,6 +528,16 @@ class VideoStitch(BaseTool):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         transition = inputs.get("transition", "cut")
         transition_dur = inputs.get("transition_duration", 0.5)
+        boundary_list = inputs.get("transitions")
+        if boundary_list is not None and len(boundary_list) != len(clips) - 1:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"transitions list has {len(boundary_list)} entries for "
+                    f"{len(clips)} clips — need exactly {len(clips) - 1} "
+                    f"(one per boundary)"
+                ),
+            )
         auto_normalize = inputs.get("auto_normalize", False)
         codec = inputs.get("codec", "libx264")
         crf = inputs.get("crf", 23)
@@ -554,7 +576,7 @@ class VideoStitch(BaseTool):
         try:
             # Normalize clips if needed
             working_clips: list[str] = []
-            if needs_norm or auto_normalize or transition != "cut":
+            if needs_norm or auto_normalize or transition != "cut" or boundary_list is not None:
                 width, height, fps, vid_codec, aud_codec = self._resolve_normalization_target(inputs, probes)
                 for i, clip in enumerate(clips):
                     norm_path = temp_dir / f"norm_{i:04d}.mp4"
@@ -567,12 +589,26 @@ class VideoStitch(BaseTool):
             # For crossfade/fade transitions, ensure every clip has an audio
             # stream so that the acrossfade filter does not fail.  Image-derived
             # video clips typically lack audio; we add a silent track for those.
-            if transition in ("crossfade", "fade"):
+            if boundary_list is not None or transition in ("crossfade", "fade"):
                 working_clips = self._ensure_audio_for_clips(
                     working_clips, temp_dir, temp_files,
                 )
 
-            if transition == "cut":
+            if boundary_list is not None:
+                # Per-boundary editorial transitions (Wave 3, M6) — one
+                # filtergraph, each boundary with its own xfade type.
+                normalized = [self._normalize_boundary(t) for t in boundary_list]
+                self._chain_xfade(
+                    working_clips, output_path, transition_dur, probes,
+                    transition="fade",
+                    boundary_types=[t for t, _ in normalized],
+                    boundary_durations=[d for _, d in normalized],
+                )
+                result_data = {
+                    "method": "xfade_per_boundary",
+                    "boundary_transitions": [t for t, _ in normalized],
+                }
+            elif transition == "cut":
                 result_data = self._stitch_cut(working_clips, output_path, temp_dir, temp_files)
             elif transition == "crossfade":
                 result_data = self._stitch_crossfade(working_clips, output_path, transition_dur, probes)
@@ -603,6 +639,47 @@ class VideoStitch(BaseTool):
             )
         finally:
             self._cleanup_temp(temp_dir, temp_files)
+
+    # Editorial transition vocabulary → ffmpeg xfade type (Wave 3, M6).
+    # The old fallback offered exactly two of ffmpeg's ~50 transitions, one
+    # global type per video — creatively empty next to the Remotion path.
+    _XFADE_MAP = {
+        "crossfade": "fade",
+        "dissolve": "fade",
+        "cross-dissolve": "fade",
+        "fade": "fadeblack",
+        "fadeblack": "fadeblack",
+        "fade-to-black": "fadeblack",
+        "dip-to-black": "fadeblack",
+        "fadewhite": "fadewhite",
+        "wipe-left": "wipeleft",
+        "wipe-right": "wiperight",
+        "wipe-up": "wipeup",
+        "wipe-down": "wipedown",
+        "slide-left": "slideleft",
+        "slide-right": "slideright",
+        "slide-up": "slideup",
+        "slide-down": "slidedown",
+        "push-left": "slideleft",
+        "push-right": "slideright",
+        "circle-open": "circleopen",
+        "circle-close": "circleclose",
+        "zoom": "zoomin",
+        "zoom-in": "zoomin",
+        "pixelize": "pixelize",
+        "radial": "radial",
+    }
+    # "cut" inside a per-boundary list: xfade has no hard cut — approximate
+    # with a 2-frame fade so mixed lists stay a single filtergraph.
+    _CUT_DURATION = 0.07
+
+    @classmethod
+    def _normalize_boundary(cls, name: str) -> tuple[str, float | None]:
+        """Map an editorial transition name to (xfade_type, duration_override)."""
+        v = str(name or "").lower().replace("_", "-").strip()
+        if v in ("cut", "none", "hard-cut", ""):
+            return ("fade", cls._CUT_DURATION)
+        return (cls._XFADE_MAP.get(v, "fade"), None)
 
     def _stitch_cut(
         self,
@@ -700,11 +777,15 @@ class VideoStitch(BaseTool):
         duration: float,
         probes: list[dict[str, Any]],
         transition: str,
+        boundary_types: list[str] | None = None,
+        boundary_durations: list[float] | None = None,
     ) -> None:
-        """Chain xfade filters for N > 2 clips.
+        """Chain xfade filters for N ≥ 2 clips.
 
         Builds a complex filtergraph that progressively applies xfade
-        between each adjacent pair of clips.
+        between each adjacent pair of clips. boundary_types/-durations
+        (length n-1) override the global `transition`/`duration` per
+        boundary (Wave 3, M6 — per-boundary editorial transitions).
         """
         n = len(clips)
         input_args: list[str] = []
@@ -719,8 +800,14 @@ class VideoStitch(BaseTool):
         cumulative_offset = 0.0
 
         for i in range(n - 1):
+            b_type = boundary_types[i] if boundary_types else transition
+            b_dur = (
+                boundary_durations[i]
+                if boundary_durations and boundary_durations[i] is not None
+                else duration
+            )
             clip_dur = probes[i].get("duration", 0) if i < len(probes) else 0
-            offset = round(cumulative_offset + clip_dur - duration, 3)
+            offset = round(cumulative_offset + clip_dur - b_dur, 3)
             offset = max(0, offset)
 
             if i == 0:
@@ -741,10 +828,10 @@ class VideoStitch(BaseTool):
                 a_out = "[aout]"
 
             video_filters.append(
-                f"{v_in1}{v_in2}xfade=transition={transition}:duration={duration}:offset={offset}{v_out}"
+                f"{v_in1}{v_in2}xfade=transition={b_type}:duration={b_dur}:offset={offset}{v_out}"
             )
             audio_filters.append(
-                f"{a_in1}{a_in2}acrossfade=d={duration}{a_out}"
+                f"{a_in1}{a_in2}acrossfade=d={b_dur}{a_out}"
             )
 
             # Cumulative offset advances by clip duration minus overlap
