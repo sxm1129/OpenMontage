@@ -12,6 +12,17 @@ from typing import Any
 from tools.base_tool import ToolResult, ToolStatus
 
 
+def fal_api_key() -> str | None:
+    """Resolve the fal.ai key from either accepted env var.
+
+    `os.environ.get("FAL_KEY") or os.environ.get("FAL_AI_API_KEY")` was
+    hand-copied into 8 files (audit 2026-07-15, structural item 2). Only the
+    RESOLUTION moves here — each tool keeps its own "not set" message, which
+    is what the operator actually reads.
+    """
+    return os.environ.get("FAL_KEY") or os.environ.get("FAL_AI_API_KEY")
+
+
 HEYGEN_PROVIDERS = {
     "veo_3_1": {"name": "Google VEO 3.1", "quality": "highest", "speed": "slow"},
     "veo_3_1_fast": {"name": "Google VEO 3.1 Fast", "quality": "high", "speed": "medium"},
@@ -456,7 +467,7 @@ def upload_image_fal(image_path: str) -> str:
     """Upload a local image to fal.ai storage and return a public URL."""
     import requests
 
-    api_key = os.environ.get("FAL_KEY") or os.environ.get("FAL_AI_API_KEY")
+    api_key = fal_api_key()
     if not api_key:
         raise RuntimeError("FAL_KEY or FAL_AI_API_KEY required for image upload")
 

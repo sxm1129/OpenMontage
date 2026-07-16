@@ -46,7 +46,12 @@ from tools.base_tool import (
     ToolStability,
     ToolTier,
 )
-from tools.maas_base import MaasBaseTool
+from tools.maas_base import (
+    MaasBaseTool,
+    MaasJobFailed,
+    MaasPollTimeout,
+    MaasPollUnreachable,
+)
 
 
 class MaasTTS(MaasBaseTool):
@@ -299,36 +304,21 @@ class MaasTTS(MaasBaseTool):
             # IndexTTS specifically, distinct from the 300-600s recommended
             # for the video models (which render for minutes, not seconds).
             # Left unchanged; revisit if real-world timeouts are observed.
-            deadline = start + 60
-            # Job is already submitted/billed — tolerate transient poll blips,
-            # but cap them so a persistently broken poll endpoint fails fast
-            # instead of spinning until the deadline (mirrors maas_video.py).
-            poll_errors = 0
-            _MAX_POLL_ERRORS = 5
-            while time.time() < deadline:
-                time.sleep(2)
-                try:
-                    poll = requests.get(
-                        f"{self._base_url()}/v1/audio/jobs/{job_id}",
-                        headers=headers,
-                        timeout=15,
-                    )
-                    poll.raise_for_status()
-                except Exception as e:
-                    poll_errors += 1
-                    if poll_errors >= _MAX_POLL_ERRORS:
-                        return ToolResult(
-                            success=False,
-                            error=f"MaaS TTS poll failed {poll_errors}x (last: {e}); job_id={job_id}",
-                        )
-                    continue  # transient — retry on the next interval
-                poll_errors = 0
-                status = poll.json().get("status", "unknown")
-                if status == "succeeded":
-                    break
-                if status in ("failed", "cancelled"):
-                    return ToolResult(success=False, error=f"MaaS TTS job {status}: {poll.json()}")
-            else:
+            try:
+                self._poll_job(
+                    f"{self._base_url()}/v1/audio/jobs/{job_id}",
+                    headers,
+                    deadline=start + 60,
+                    interval=2,
+                )
+            except MaasPollUnreachable as e:
+                return ToolResult(
+                    success=False,
+                    error=f"MaaS TTS poll failed {e.attempts}x (last: {e.last_error}); job_id={job_id}",
+                )
+            except MaasJobFailed as e:
+                return ToolResult(success=False, error=f"MaaS TTS job {e.status}: {e.payload}")
+            except MaasPollTimeout:
                 return ToolResult(success=False, error=f"MaaS TTS job timed out (job_id={job_id})")
 
             try:

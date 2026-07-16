@@ -40,7 +40,12 @@ from tools.base_tool import (
     ToolStability,
     ToolTier,
 )
-from tools.maas_base import MaasBaseTool
+from tools.maas_base import (
+    MaasBaseTool,
+    MaasJobFailed,
+    MaasPollTimeout,
+    MaasPollUnreachable,
+)
 
 
 # Default poll interval recommended by the gateway (seconds)
@@ -446,39 +451,22 @@ class MaasVideo(MaasBaseTool):
         # The job is already submitted and will be billed regardless, so tolerate
         # transient poll blips (502/504/reset/timeout) instead of abandoning a
         # paid generation on the first one.
-        deadline = start + _POLL_TIMEOUT
-        poll_errors = 0
-        _MAX_POLL_ERRORS = 5
-        while time.time() < deadline:
-            time.sleep(_POLL_INTERVAL)
-            try:
-                poll_resp = requests.get(
-                    f"{base_url}/v1/video/jobs/{job_id}",
-                    headers=headers,
-                    timeout=15,
-                )
-                poll_resp.raise_for_status()
-            except Exception as e:
-                poll_errors += 1
-                if poll_errors >= _MAX_POLL_ERRORS:
-                    return ToolResult(
-                        success=False,
-                        error=f"MaaS poll failed {poll_errors}x (last: {e}); job_id={job_id}",
-                    )
-                continue  # transient — retry on the next interval
-            poll_errors = 0
-
-            status_data = poll_resp.json()
-            status = status_data.get("status", "unknown")
-
-            if status == "succeeded":
-                break
-            if status in ("failed", "cancelled"):
-                err = status_data.get("error") or f"Job {status}"
-                return ToolResult(success=False, error=f"MaaS video generation {status}: {err}")
-            # still processing — keep polling
-
-        else:
+        try:
+            self._poll_job(
+                f"{base_url}/v1/video/jobs/{job_id}",
+                headers,
+                deadline=start + _POLL_TIMEOUT,
+                interval=_POLL_INTERVAL,
+            )
+        except MaasPollUnreachable as e:
+            return ToolResult(
+                success=False,
+                error=f"MaaS poll failed {e.attempts}x (last: {e.last_error}); job_id={job_id}",
+            )
+        except MaasJobFailed as e:
+            err = e.payload.get("error") or f"Job {e.status}"
+            return ToolResult(success=False, error=f"MaaS video generation {e.status}: {err}")
+        except MaasPollTimeout:
             return ToolResult(
                 success=False,
                 error=f"MaaS video generation timed out after {_POLL_TIMEOUT}s (job_id={job_id})",

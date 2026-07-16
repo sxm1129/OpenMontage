@@ -152,17 +152,25 @@ class TestContract:
         discovery must stay fast)."""
         import importlib
         import sys
-        # Remove requests from cache to simulate fresh import
+        # Remove requests from cache to simulate fresh import, and PUT IT
+        # BACK afterwards. Without the restore this test leaked: a later
+        # `import requests` builds a NEW module object, so any test that
+        # monkeypatched requests.get on the old object silently patched
+        # nothing and made a real network call (hit by
+        # test_maas_poll_job.py, which imports requests at module scope).
         mod_name = cls.__module__
-        if "requests" in sys.modules:
-            del sys.modules["requests"]
-        # Re-import the tool module — should not pull in requests
-        # (requests is imported inside execute(), not at module level)
-        importlib.reload(sys.modules[mod_name])
-        # The tool module itself should not have imported requests
-        # (it's inside execute, so module-level reload shouldn't trigger it)
-        # This is a smoke test — the real proof is that registry.discover()
-        # works without requests installed, but requests IS installed here.
+        saved = sys.modules.pop("requests", None)
+        try:
+            # Re-import the tool module — should not pull in requests
+            # (requests is imported inside execute(), not at module level)
+            importlib.reload(sys.modules[mod_name])
+            # The tool module itself should not have imported requests
+            # (it's inside execute, so module-level reload shouldn't trigger it)
+            # This is a smoke test — the real proof is that registry.discover()
+            # works without requests installed, but requests IS installed here.
+        finally:
+            if saved is not None:
+                sys.modules["requests"] = saved
 
     def test_estimate_cost_returns_float(self, cls):
         tool = cls()

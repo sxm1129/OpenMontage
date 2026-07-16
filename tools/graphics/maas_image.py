@@ -31,7 +31,12 @@ from tools.base_tool import (
     ToolStability,
     ToolTier,
 )
-from tools.maas_base import MaasBaseTool
+from tools.maas_base import (
+    MaasBaseTool,
+    MaasJobFailed,
+    MaasPollTimeout,
+    MaasPollUnreachable,
+)
 
 
 class MaasImage(MaasBaseTool):
@@ -221,39 +226,27 @@ class MaasImage(MaasBaseTool):
         # Poll /v1/images/jobs/{requestId} until succeeded.
         if data.get("object") == "task":
             job_id = data.get("id")  # requestId set by the gateway controller
-            deadline = start + 300  # 5-minute timeout for image jobs
-            # Job is already submitted/billed — tolerate transient poll blips.
-            poll_errors = 0
-            _MAX_POLL_ERRORS = 5
-            while time.time() < deadline:
-                time.sleep(3)
-                try:
-                    poll = requests.get(
-                        f"{base_url}/v1/images/jobs/{job_id}",
-                        headers={"Authorization": f"Bearer {api_key}"},
-                        timeout=15,
-                    )
-                    poll.raise_for_status()
-                except Exception as e:
-                    poll_errors += 1
-                    if poll_errors >= _MAX_POLL_ERRORS:
-                        return ToolResult(
-                            success=False,
-                            error=f"MaaS image poll failed {poll_errors}x (last: {e}); job_id={job_id}",
-                        )
-                    continue  # transient — retry on the next interval
-                poll_errors = 0
-                poll_data = poll.json()
-                status = poll_data.get("status", "unknown")
-                if status in ("succeeded", "completed"):
-                    data = poll_data
-                    break
-                if status in ("failed", "cancelled"):
-                    return ToolResult(
-                        success=False,
-                        error=f"MaaS image job {status}: {poll_data.get('error')}",
-                    )
-            else:
+            try:
+                # This surface reports either status; the poll headers are
+                # auth-only here (no Content-Type on a GET) — kept as-is.
+                data = self._poll_job(
+                    f"{base_url}/v1/images/jobs/{job_id}",
+                    {"Authorization": f"Bearer {api_key}"},
+                    deadline=start + 300,  # 5-minute timeout for image jobs
+                    interval=3,
+                    success_statuses=("succeeded", "completed"),
+                )
+            except MaasPollUnreachable as e:
+                return ToolResult(
+                    success=False,
+                    error=f"MaaS image poll failed {e.attempts}x (last: {e.last_error}); job_id={job_id}",
+                )
+            except MaasJobFailed as e:
+                return ToolResult(
+                    success=False,
+                    error=f"MaaS image job {e.status}: {e.payload.get('error')}",
+                )
+            except MaasPollTimeout:
                 return ToolResult(success=False, error=f"MaaS image job timed out (job_id={job_id})")
 
         # Synchronous response or settled async job:

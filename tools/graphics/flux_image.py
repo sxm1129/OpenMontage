@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -19,6 +18,7 @@ from tools.base_tool import (
     ToolStatus,
     ToolTier,
 )
+from tools.video._shared import fal_api_key
 
 
 class FluxImage(BaseTool):
@@ -81,7 +81,7 @@ class FluxImage(BaseTool):
     user_visible_verification = ["Inspect generated image for relevance and quality"]
 
     def _get_api_key(self) -> str | None:
-        return os.environ.get("FAL_KEY") or os.environ.get("FAL_AI_API_KEY")
+        return fal_api_key()
 
     def get_status(self) -> ToolStatus:
         if self._get_api_key():

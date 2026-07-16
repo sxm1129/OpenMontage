@@ -32,6 +32,7 @@ from tools.base_tool import (
     ToolStatus,
     ToolTier,
 )
+from tools.video._shared import fal_api_key
 
 
 class ImageGen(BaseTool):
@@ -109,7 +110,7 @@ class ImageGen(BaseTool):
     def _detect_provider(self) -> Optional[str]:
         if os.environ.get("OPENAI_API_KEY"):
             return "openai"
-        if os.environ.get("FAL_KEY") or os.environ.get("FAL_AI_API_KEY"):
+        if fal_api_key():
             return "flux"
         try:
             import diffusers  # noqa: F401
@@ -189,7 +190,7 @@ class ImageGen(BaseTool):
     def _generate_flux(self, inputs: dict[str, Any]) -> ToolResult:
         import requests
 
-        api_key = os.environ.get("FAL_KEY") or os.environ["FAL_AI_API_KEY"]
+        api_key = fal_api_key()
         prompt = inputs["prompt"]
         width = inputs.get("width", 1024)
         height = inputs.get("height", 1024)
