@@ -1,5 +1,6 @@
 import { AbsoluteFill, spring, useCurrentFrame, useVideoConfig } from "remotion";
-import { withCjkFallback } from "../fonts";
+import { themeFont } from "../fonts";
+import { useTheme } from "../lib/theme";
 
 interface StatCardProps {
   stat: string;
@@ -16,17 +17,19 @@ export const StatCard: React.FC<StatCardProps> = ({
   subtitle,
   statFontSize = 128,
   subtitleFontSize = 36,
-  color = "#FFFFFF",
-  accentColor = "#F59E0B",
-  backgroundColor = "#1F2937",
+  color,
+  accentColor,
+  backgroundColor,
 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+  // Theme-driven defaults + motion (Wave 2, item 10) — explicit props win.
+  const theme = useTheme();
 
   const scale = spring({
     frame,
     fps,
-    config: { damping: 12, stiffness: 120 },
+    config: theme.springConfig,
     from: 0.8,
     to: 1,
   });
@@ -42,7 +45,7 @@ export const StatCard: React.FC<StatCardProps> = ({
       style={{
         justifyContent: "center",
         alignItems: "center",
-        background: backgroundColor,
+        background: backgroundColor ?? theme.surfaceColor,
       }}
     >
       <div style={{ textAlign: "center" }}>
@@ -50,8 +53,8 @@ export const StatCard: React.FC<StatCardProps> = ({
           style={{
             transform: `scale(${scale})`,
             fontSize: statFontSize,
-            color: accentColor,
-            fontFamily: withCjkFallback("Inter, system-ui, sans-serif"),
+            color: accentColor ?? theme.accentColor,
+            fontFamily: themeFont(theme.headingFont, "Inter, system-ui, sans-serif"),
             fontWeight: 800,
             lineHeight: 1.1,
           }}
@@ -63,8 +66,8 @@ export const StatCard: React.FC<StatCardProps> = ({
             style={{
               opacity: subtitleOpacity,
               fontSize: subtitleFontSize,
-              color,
-              fontFamily: withCjkFallback("Inter, system-ui, sans-serif"),
+              color: color ?? theme.textColor,
+              fontFamily: themeFont(theme.bodyFont, "Inter, system-ui, sans-serif"),
               fontWeight: 400,
               marginTop: 16,
             }}

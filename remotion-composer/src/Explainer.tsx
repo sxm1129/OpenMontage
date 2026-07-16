@@ -22,7 +22,12 @@ import { LineChart } from "./components/charts/LineChart";
 import { PieChart } from "./components/charts/PieChart";
 import { KPIGrid } from "./components/charts/KPIGrid";
 import { ProgressBar } from "./components/ProgressBar";
-import { CaptionOverlay, WordCaption } from "./components/CaptionOverlay";
+import {
+  CaptionOverlay,
+  WordCaption,
+  type CaptionStyle,
+  type CaptionSafeArea,
+} from "./components/CaptionOverlay";
 import { SectionTitle } from "./components/SectionTitle";
 import { StatReveal } from "./components/StatReveal";
 import { HeroTitle } from "./components/HeroTitle";
@@ -34,9 +39,9 @@ import { ScreenshotScene } from "./components/ScreenshotScene";
 import type { ScreenshotStep } from "./components/ScreenshotScene";
 import { ProviderChip } from "./components/ProviderChip";
 import type { ParticleType } from "./components/ParticleOverlay";
-import { resolveTheme, type ThemeConfig, DEFAULT_THEME } from "./Root";
+import { resolveTheme, type ThemeConfig, DEFAULT_THEME, ThemeContext } from "./lib/theme";
 import { withCjkFallback, themeFont } from "./fonts";
-import { EASE_IN_OUT, SPRING_ENTER } from "./lib/motion";
+import { DUR_TRANSITION_S, EASE_IN_OUT, SPRING_ENTER } from "./lib/motion";
 
 // Load Space Grotesk font for cinematic typography
 const { fontFamily: spaceGrotesk } = loadFont("normal", {
@@ -77,7 +82,24 @@ function shiftColor(hex: string, amount: number): string {
   return `rgb(${clamp(r + (255 - r) * amount)}, ${clamp(g + (255 - g) * amount)}, ${clamp(b + (255 - b) * amount)})`;
 }
 
-const AnimatedBackground: React.FC<{ theme: ThemeConfig }> = ({ theme }) => {
+// Background rendering modes (audit 2026-07-16, Wave 2 — the "sameness"
+// problem): the mesh-gradient + orbs + grid look ran under EVERY video in
+// EVERY theme and became the house tell. edit_decisions.background.mode
+// now picks the treatment; "mesh" stays the default for back-compat.
+export type BackgroundMode = "mesh" | "solid" | "radial" | "none";
+
+export interface BackgroundConfig {
+  mode?: BackgroundMode;
+  /** Film grain intensity 0-1 (0 = off). */
+  grain?: number;
+  /** Composition-level vignette strength 0-1 (0 = off). */
+  vignette?: number;
+}
+
+const AnimatedBackground: React.FC<{ theme: ThemeConfig; mode?: BackgroundMode }> = ({
+  theme,
+  mode = "mesh",
+}) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
 
@@ -86,6 +108,24 @@ const AnimatedBackground: React.FC<{ theme: ThemeConfig }> = ({ theme }) => {
   const accent = theme.accentColor;
   const surface = theme.surfaceColor;
   const light = isLightColor(bg);
+
+  if (mode === "none") {
+    return null;
+  }
+  if (mode === "solid") {
+    return <AbsoluteFill style={{ background: bg }} />;
+  }
+  if (mode === "radial") {
+    // Single quiet radial spot — editorial, keeps focus on the content.
+    const { r, g, b } = hexToRgb(primary);
+    return (
+      <AbsoluteFill
+        style={{
+          background: `radial-gradient(ellipse at 50% 38%, rgba(${r},${g},${b},${light ? 0.08 : 0.14}) 0%, transparent 62%), ${bg}`,
+        }}
+      />
+    );
+  }
 
   // Slow-moving gradient angles
   const angle1 = 135 + Math.sin(frame / (fps * 8)) * 30;
@@ -236,6 +276,8 @@ interface Cut {
   animation?: string;
   transition_in?: string;
   transition_out?: string;
+  /** Boundary transition duration in seconds (default: DUR_TRANSITION_S). */
+  transition_duration?: number;
   transform?: {
     animation?: string;
     scale?: number;
@@ -298,6 +340,7 @@ export interface ExplainerProps {
   overlays?: Overlay[];
   captions?: WordCaption[];
   audio?: AudioConfig;
+  background?: BackgroundConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +359,51 @@ function isVideo(source: string): boolean {
   const lower = source.toLowerCase();
   return VIDEO_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
+
+// ---------------------------------------------------------------------------
+// Texture layers — film grain + composition-level vignette (Wave 2, item 12)
+// ---------------------------------------------------------------------------
+
+// Deterministic SVG noise, jittered by frame so it reads as live grain
+// instead of a static texture. Cheap: one data-URI, translated per frame.
+const GRAIN_URI =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" seed="7"/></filter><rect width="240" height="240" filter="url(%23n)"/></svg>`
+  );
+
+const FilmGrain: React.FC<{ intensity: number }> = ({ intensity }) => {
+  const frame = useCurrentFrame();
+  if (intensity <= 0) return null;
+  // Deterministic 8-phase jitter — same frame always renders the same grain.
+  const phase = frame % 8;
+  const dx = (phase * 37) % 120;
+  const dy = (phase * 71) % 120;
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundImage: `url("${GRAIN_URI}")`,
+        backgroundPosition: `${dx}px ${dy}px`,
+        opacity: Math.min(intensity, 1) * 0.12,
+        mixBlendMode: "overlay",
+        pointerEvents: "none",
+      }}
+    />
+  );
+};
+
+const CompositionVignette: React.FC<{ strength: number }> = ({ strength }) => {
+  if (strength <= 0) return null;
+  const alpha = Math.min(strength, 1) * 0.55;
+  return (
+    <AbsoluteFill
+      style={{
+        background: `radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,${alpha}) 100%)`,
+        pointerEvents: "none",
+      }}
+    />
+  );
+};
 
 // ---------------------------------------------------------------------------
 // Cinematic vignette overlay
@@ -760,11 +848,97 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
 };
 
 // ---------------------------------------------------------------------------
+// Scene-boundary transitions (audit 2026-07-16, Wave 2 item 8)
+//
+// edit_decisions authors real editorial intent in cuts[].transition_in/out
+// ("dissolve" at the reveal, "cut" elsewhere) — previously dead props, every
+// boundary rendered identically. Design: the INCOMING cut's Sequence starts
+// `d` early and animates in ON TOP of the still-playing previous cut. This
+// deliberately does NOT use @remotion/transitions' TransitionSeries: that
+// model shortens the total timeline by each overlap, desyncing the
+// absolute-timed narration/captions. Here the timeline is untouched — the
+// incoming visuals simply lead their nominal start by `d` (a J-cut feel:
+// picture leads sound), and the outgoing cut keeps playing beneath.
+// ---------------------------------------------------------------------------
+
+/** Boundary spec → canonical transition, or null for a hard cut. */
+function normalizeBoundaryTransition(value: string | undefined | null): string | null {
+  if (!value) return null;
+  const v = value.toLowerCase().replace(/_/g, "-");
+  if (v === "cut" || v === "none" || v === "hard-cut") return null;
+  if (["fade", "dissolve", "crossfade", "fade-in", "cross-dissolve", "fade-to-black", "fadeblack", "dip-to-black"].includes(v)) {
+    return "fade";
+  }
+  if (["slide-left", "slide-right", "slide-up", "slide-down", "push-left", "push-right"].includes(v)) {
+    return v.replace("push-", "slide-");
+  }
+  if (["wipe-left", "wipe-right", "wipe-up", "wipe-down", "wipe"].includes(v)) {
+    return v === "wipe" ? "wipe-right" : v;
+  }
+  if (["zoom", "zoom-in", "scale"].includes(v)) return "zoom";
+  // Unknown but explicitly non-cut: the agent asked for SOME transition —
+  // degrade to the least-opinionated one instead of silently hard-cutting.
+  return "fade";
+}
+
+const SceneTransitionIn: React.FC<{
+  type: string;
+  durationInFrames: number;
+  children: React.ReactNode;
+}> = ({ type, durationInFrames, children }) => {
+  const frame = useCurrentFrame();
+  const p = interpolate(frame, [0, Math.max(1, durationInFrames)], [0, 1], {
+    easing: EASE_IN_OUT,
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
+  const style: React.CSSProperties = {};
+  switch (type) {
+    case "slide-left":
+      style.transform = `translateX(${(1 - p) * 100}%)`;
+      break;
+    case "slide-right":
+      style.transform = `translateX(${(p - 1) * 100}%)`;
+      break;
+    case "slide-up":
+      style.transform = `translateY(${(1 - p) * 100}%)`;
+      break;
+    case "slide-down":
+      style.transform = `translateY(${(p - 1) * 100}%)`;
+      break;
+    case "wipe-left":
+      // Reveal edge travels right → left.
+      style.clipPath = `inset(0 0 0 ${(1 - p) * 100}%)`;
+      break;
+    case "wipe-right":
+      style.clipPath = `inset(0 ${(1 - p) * 100}% 0 0)`;
+      break;
+    case "wipe-up":
+      style.clipPath = `inset(${(1 - p) * 100}% 0 0 0)`;
+      break;
+    case "wipe-down":
+      style.clipPath = `inset(0 0 ${(1 - p) * 100}% 0)`;
+      break;
+    case "zoom":
+      style.opacity = p;
+      style.transform = `scale(${1.08 - 0.08 * p})`;
+      break;
+    case "fade":
+    default:
+      style.opacity = p;
+      break;
+  }
+
+  return <AbsoluteFill style={{ ...style, willChange: "transform, opacity" }}>{children}</AbsoluteFill>;
+};
+
+// ---------------------------------------------------------------------------
 // Main composition
 // ---------------------------------------------------------------------------
 
 export const Explainer: React.FC<ExplainerProps> = (props) => {
-  const { cuts, overlays, captions, audio } = props;
+  const { cuts, overlays, captions, audio, background } = props;
   const { fps, durationInFrames } = useVideoConfig();
 
   // Resolve theme from props — playbook name, theme name, or custom themeConfig
@@ -776,18 +950,37 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
   const rootFontFamily = theme.headingFont ? themeFont(theme.headingFont, spaceGrotesk) : fontFamily;
 
   return (
+    <ThemeContext.Provider value={theme}>
     <AbsoluteFill style={{ background: theme.backgroundColor, fontFamily: rootFontFamily }}>
-      {/* Layer 0: Animated gradient background — driven by theme */}
-      <AnimatedBackground theme={theme} />
+      {/* Layer 0: Background — mode selectable per edit_decisions.background */}
+      <AnimatedBackground theme={theme} mode={background?.mode} />
 
-      {/* Layer 1: Visual scenes */}
-      {cuts.map((cut) => {
-        const from = Math.round(cut.in_seconds * fps);
-        const duration = Math.round((cut.out_seconds - cut.in_seconds) * fps);
+      {/* Layer 1: Visual scenes. A cut whose boundary declares a transition
+          starts `lead` frames early and animates in over the previous cut
+          (see SceneTransitionIn — the timeline itself never shifts). */}
+      {cuts.map((cut, i) => {
+        const nominalFrom = Math.round(cut.in_seconds * fps);
+        const boundary = normalizeBoundaryTransition(
+          cut.transition_in ?? cuts[i - 1]?.transition_out
+        );
+        const transitionFrames =
+          boundary && i > 0
+            ? Math.round((cut.transition_duration ?? DUR_TRANSITION_S) * fps)
+            : 0;
+        const from = Math.max(0, nominalFrom - transitionFrames);
+        const lead = nominalFrom - from;
+        const duration = Math.round(cut.out_seconds * fps) - from;
 
+        const scene = <SceneRenderer cut={cut} theme={theme} />;
         return (
           <Sequence key={cut.id} from={from} durationInFrames={duration}>
-            <SceneRenderer cut={cut} theme={theme} />
+            {boundary && lead > 0 ? (
+              <SceneTransitionIn type={boundary} durationInFrames={lead}>
+                {scene}
+              </SceneTransitionIn>
+            ) : (
+              scene
+            )}
           </Sequence>
         );
       })}
@@ -806,16 +999,27 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
         );
       })}
 
-      {/* Layer 3: Captions (word-by-word highlight) */}
-      {captions && captions.length > 0 && (
-        <CaptionOverlay
-          words={captions}
-          wordsPerPage={6}
-          fontSize={42}
-          highlightColor={theme.captionHighlightColor}
-          backgroundColor={theme.captionBackgroundColor}
-        />
-      )}
+      {/* Layer 2.5: Texture — grain/vignette over the picture, under captions */}
+      <FilmGrain intensity={background?.grain ?? 0} />
+      <CompositionVignette strength={background?.vignette ?? 0} />
+
+      {/* Layer 3: Captions (word-by-word highlight) — styling/anchoring
+          configurable via edit_decisions.subtitles */}
+      {captions && captions.length > 0 && (() => {
+        const sub = (props.subtitles ?? {}) as Record<string, unknown>;
+        return (
+          <CaptionOverlay
+            words={captions}
+            wordsPerPage={(sub.max_words_per_line as number) ?? 6}
+            fontSize={(sub.font_size as number) ?? 42}
+            highlightColor={theme.captionHighlightColor}
+            backgroundColor={theme.captionBackgroundColor}
+            captionStyle={(sub.caption_style as CaptionStyle) ?? "pill"}
+            safeArea={(sub.safe_area as CaptionSafeArea) ?? "none"}
+            maxLineCells={(sub.max_line_cells as number) ?? 32}
+          />
+        );
+      })()}
 
       {/* Layer 4: Audio — narration */}
       {audio?.narration?.src && (
@@ -852,5 +1056,6 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
         />
       )}
     </AbsoluteFill>
+    </ThemeContext.Provider>
   );
 };

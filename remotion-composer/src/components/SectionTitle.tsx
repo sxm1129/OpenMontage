@@ -6,6 +6,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import { withCjkFallback } from "../fonts";
+import { useTheme } from "../lib/theme";
 
 interface SectionTitleProps {
   title: string;
@@ -17,11 +18,14 @@ interface SectionTitleProps {
 export const SectionTitle: React.FC<SectionTitleProps> = ({
   title,
   subtitle,
-  accentColor = "#22D3EE",
+  accentColor,
   position = "top-left",
 }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
+  const theme = useTheme();
+  // Themed accent default — explicit prop wins (Wave 2, item 10).
+  const accent = accentColor ?? theme.accentColor;
 
   // Entrance spring
   const slideIn = spring({
@@ -59,7 +63,7 @@ export const SectionTitle: React.FC<SectionTitleProps> = ({
           style={{
             width: interpolate(slideIn, [0, 1], [0, 60]),
             height: 4,
-            backgroundColor: accentColor,
+            backgroundColor: accent,
             marginBottom: 12,
             borderRadius: 2,
           }}
@@ -82,7 +86,7 @@ export const SectionTitle: React.FC<SectionTitleProps> = ({
             style={{
               fontSize: 18,
               fontWeight: 400,
-              color: accentColor,
+              color: accent,
               fontFamily: withCjkFallback("Space Grotesk, Inter, system-ui, sans-serif"),
               marginTop: 4,
               opacity: spring({

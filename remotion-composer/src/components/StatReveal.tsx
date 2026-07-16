@@ -6,6 +6,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import { withCjkFallback } from "../fonts";
+import { useTheme } from "../lib/theme";
 
 interface StatRevealProps {
   stat: string;
@@ -17,11 +18,14 @@ interface StatRevealProps {
 export const StatReveal: React.FC<StatRevealProps> = ({
   stat,
   label,
-  accentColor = "#A78BFA",
+  accentColor,
   position = "bottom-right",
 }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
+  const theme = useTheme();
+  // Themed accent default — explicit prop wins (Wave 2, item 10).
+  const accent = accentColor ?? theme.accentColor;
 
   // Bouncy entrance
   const scale = spring({
@@ -67,10 +71,10 @@ export const StatReveal: React.FC<StatRevealProps> = ({
           style={{
             fontSize: 96,
             fontWeight: 800,
-            color: accentColor,
+            color: accent,
             fontFamily: withCjkFallback("Space Grotesk, Inter, system-ui, sans-serif"),
             lineHeight: 1,
-            textShadow: `0 0 ${interpolate(glow, [0, 1], [0, 30])}px ${accentColor}66, 0 4px 12px rgba(0,0,0,0.5)`,
+            textShadow: `0 0 ${interpolate(glow, [0, 1], [0, 30])}px ${accent}66, 0 4px 12px rgba(0,0,0,0.5)`,
           }}
         >
           {stat}

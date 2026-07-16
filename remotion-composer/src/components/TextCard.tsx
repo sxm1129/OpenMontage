@@ -1,5 +1,6 @@
 import { AbsoluteFill, spring, useCurrentFrame, useVideoConfig } from "remotion";
-import { withCjkFallback } from "../fonts";
+import { themeFont } from "../fonts";
+import { useTheme } from "../lib/theme";
 
 interface TextCardProps {
   text: string;
@@ -11,17 +12,21 @@ interface TextCardProps {
 export const TextCard: React.FC<TextCardProps> = ({
   text,
   fontSize = 64,
-  color = "#FFFFFF",
-  backgroundColor = "#1F2937",
+  color,
+  backgroundColor,
 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+  // Theme-driven type + motion (Wave 2, item 10): this card previously
+  // hardcoded Inter and its own spring — themes changed the background but
+  // never the most common text scene.
+  const theme = useTheme();
 
   const opacity = spring({ frame, fps, config: { damping: 20 } });
   const scale = spring({
     frame,
     fps,
-    config: { damping: 15, stiffness: 100 },
+    config: theme.springConfig,
     from: 0.95,
     to: 1,
   });
@@ -31,7 +36,7 @@ export const TextCard: React.FC<TextCardProps> = ({
       style={{
         justifyContent: "center",
         alignItems: "center",
-        background: backgroundColor,
+        background: backgroundColor ?? theme.surfaceColor,
       }}
     >
       <div
@@ -39,8 +44,8 @@ export const TextCard: React.FC<TextCardProps> = ({
           opacity,
           transform: `scale(${scale})`,
           fontSize,
-          color,
-          fontFamily: withCjkFallback("Inter, system-ui, sans-serif"),
+          color: color ?? theme.textColor,
+          fontFamily: themeFont(theme.headingFont, "Inter, system-ui, sans-serif"),
           fontWeight: 700,
           textAlign: "center",
           maxWidth: "80%",

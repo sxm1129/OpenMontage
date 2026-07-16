@@ -5,7 +5,8 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import { withCjkFallback } from "../fonts";
+import { themeFont } from "../fonts";
+import { useTheme } from "../lib/theme";
 
 interface HeroTitleProps {
   // Index signature required by Remotion's <Composition> prop typing —
@@ -15,12 +16,25 @@ interface HeroTitleProps {
   subtitle?: string;
 }
 
+/** Indices of the characters that carry the accent color: the first WORD
+ *  (space-delimited), or the first two characters for space-less CJK
+ *  titles. The old rule was `i < 8` — the first 8 CHARACTERS in hardcoded
+ *  cyan regardless of word boundaries or theme (audit 2026-07-16, item 10). */
+function accentCharCount(title: string): number {
+  const firstSpace = title.indexOf(" ");
+  if (firstSpace > 0) return firstSpace;
+  // No spaces: CJK (or one-word Latin) — accent a short leading run.
+  return Math.min(2, title.length);
+}
+
 export const HeroTitle: React.FC<HeroTitleProps> = ({ title, subtitle }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+  const theme = useTheme();
 
-  // Staggered letter-by-letter spring
   const titleChars = title.split("");
+  const accentCount = accentCharCount(title);
+  const heroFont = themeFont(theme.headingFont, "Space Grotesk, Inter, system-ui, sans-serif");
 
   return (
     <AbsoluteFill
@@ -37,7 +51,7 @@ export const HeroTitle: React.FC<HeroTitleProps> = ({ title, subtitle }) => {
           style={{
             fontSize: 72,
             fontWeight: 800,
-            fontFamily: withCjkFallback("Space Grotesk, Inter, system-ui, sans-serif"),
+            fontFamily: heroFont,
             lineHeight: 1.2,
             display: "flex",
             justifyContent: "center",
@@ -60,7 +74,7 @@ export const HeroTitle: React.FC<HeroTitleProps> = ({ title, subtitle }) => {
                   display: "inline-block",
                   opacity: charSpring,
                   transform: `translateY(${interpolate(charSpring, [0, 1], [30, 0])}px)`,
-                  color: i < 8 ? "#22D3EE" : "#F8FAFC", // Accent first word
+                  color: i < accentCount ? theme.accentColor : "#F8FAFC",
                   whiteSpace: char === " " ? "pre" : undefined,
                   minWidth: char === " " ? "0.3em" : undefined,
                 }}
@@ -83,8 +97,8 @@ export const HeroTitle: React.FC<HeroTitleProps> = ({ title, subtitle }) => {
               }),
               fontSize: 28,
               fontWeight: 400,
-              color: "#A78BFA",
-              fontFamily: withCjkFallback("Space Grotesk, Inter, system-ui, sans-serif"),
+              color: theme.mutedTextColor,
+              fontFamily: heroFont,
               letterSpacing: "0.1em",
               textTransform: "uppercase",
             }}
@@ -93,12 +107,13 @@ export const HeroTitle: React.FC<HeroTitleProps> = ({ title, subtitle }) => {
           </div>
         )}
 
-        {/* Animated underline */}
+        {/* Animated underline — themed, sized to the title instead of a
+            hardcoded 400px */}
         <div
           style={{
             margin: "24px auto 0",
             height: 3,
-            backgroundColor: "#22D3EE",
+            backgroundColor: theme.accentColor,
             borderRadius: 2,
             width: interpolate(
               spring({
@@ -107,7 +122,7 @@ export const HeroTitle: React.FC<HeroTitleProps> = ({ title, subtitle }) => {
                 config: { damping: 15, stiffness: 60 },
               }),
               [0, 1],
-              [0, 400]
+              [0, Math.min(640, Math.max(240, title.length * 26))]
             ),
           }}
         />
