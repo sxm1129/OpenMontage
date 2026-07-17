@@ -158,7 +158,7 @@ OpenMontage artifacts into HyperFrames project files:
 | `renderer_family` | Controls which top-level HTML template is used and which registry blocks are pre-installed |
 
 The concrete rendering is: `hyperframes_compose` writes files into the
-workspace, runs `lint → validate → render`, and returns a `render_report`
+workspace, runs `check → render`, and returns a `render_report`
 with the path to the generated MP4. See `tools/video/hyperframes_compose.py`.
 
 ### Workspace-local authoring artifacts
