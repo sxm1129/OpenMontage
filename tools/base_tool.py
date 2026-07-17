@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import functools
 import hashlib
+import importlib.util
 import inspect
 import json
 import logging
@@ -149,6 +150,100 @@ import threading as _threading
 _EXECUTE_DEPTH = _threading.local()
 
 
+# Errors that a PAID tool must never auto-retry. A rate_limit means the
+# provider REFUSED the request — nothing ran, nothing was billed, retrying is
+# free. A timeout means we DON'T KNOW: for kling/veo/seedance the queue job may
+# still be running and billing (poll_fal_queue raises TimeoutError at 600s
+# precisely while the job is alive), so a retry submits a SECOND paid job and
+# double-charges. Local/free tools retry timeouts happily — retrying costs
+# nothing there.
+_UNSAFE_TO_RETRY_WHEN_PAID = frozenset({"timeout", "timed out"})
+
+
+def _tool_costs_money(tool: Any, inputs: Any) -> bool:
+    """Whether this call is expected to be billed. Fails CLOSED (assumes paid).
+
+    estimate_cost can legitimately raise on odd inputs (a duration string it
+    can't parse), and guessing "free" there would be the expensive mistake.
+    """
+    try:
+        return float(tool.estimate_cost(inputs)) > 0
+    except Exception:
+        return True
+
+
+def _retryable_reason(policy: Any, error_text: str, paid: bool) -> Optional[str]:
+    """The declared error substring matching `error_text`, or None.
+
+    `retryable_errors` is an allowlist — the tool author naming the specific
+    failures that are safe to repeat. A blanket retry is never correct here.
+    """
+    if not error_text:
+        return None
+    haystack = error_text.lower()
+    for declared in policy.retryable_errors or []:
+        needle = str(declared).lower()
+        if needle and needle in haystack:
+            if paid and any(u in needle for u in _UNSAFE_TO_RETRY_WHEN_PAID):
+                continue  # declared, but not safe to honor on a paid call
+            return str(declared)
+    return None
+
+
+def _run_with_retry(tool: Any, fn: Callable, inputs: Any, args: tuple, kwargs: dict):
+    """Call fn, honoring the tool's declared retry_policy. Returns (result, attempts).
+
+    Until now retry_policy was pure documentation: 56 tools declared one and
+    NOTHING read it, so `max_retries=2, retryable_errors=["rate_limit"]` was a
+    promise to the reader (and to any agent reading get_info()) that no code
+    kept (audit 2026-07-15, S-5).
+
+    Retries only when the failure matches the tool's OWN allowlist, and never
+    on a timeout for a call that costs money (see _UNSAFE_TO_RETRY_WHEN_PAID).
+    Default policy is max_retries=0, so a tool that declares nothing keeps its
+    exact current behavior.
+    """
+    policy = getattr(tool, "retry_policy", None)
+    max_retries = int(getattr(policy, "max_retries", 0) or 0)
+    if max_retries <= 0 or not getattr(policy, "retryable_errors", None):
+        return fn(tool, inputs, *args, **kwargs), 1
+
+    paid = _tool_costs_money(tool, inputs)
+    backoff = float(getattr(policy, "backoff_seconds", 1.0) or 1.0)
+    log = logging.getLogger("tool_retry")
+    tool_name = getattr(tool, "name", type(tool).__name__)
+
+    attempt = 0
+    while True:
+        attempt += 1
+        error_text = ""
+        result = None
+        try:
+            result = fn(tool, inputs, *args, **kwargs)
+            if getattr(result, "success", True):
+                return result, attempt
+            error_text = str(getattr(result, "error", "") or "")
+        except Exception as exc:  # noqa: BLE001 — re-raised below if not retryable
+            error_text = f"{type(exc).__name__}: {exc}"
+            if attempt > max_retries or not _retryable_reason(policy, error_text, paid):
+                raise
+            log.warning(
+                "%s attempt %d/%d raised a retryable error (%s) — retrying in %.1fs",
+                tool_name, attempt, max_retries + 1, error_text[:120], backoff * attempt,
+            )
+            time.sleep(backoff * attempt)
+            continue
+
+        reason = _retryable_reason(policy, error_text, paid)
+        if attempt > max_retries or reason is None:
+            return result, attempt
+        log.warning(
+            "%s attempt %d/%d failed with declared-retryable %r — retrying in %.1fs",
+            tool_name, attempt, max_retries + 1, reason, backoff * attempt,
+        )
+        time.sleep(backoff * attempt)
+
+
 def _instrument_execute(fn: Callable) -> Callable:
     """Wrap a tool's execute() with Backlot event emission.
 
@@ -196,7 +291,7 @@ def _instrument_execute(fn: Callable) -> Callable:
 
         started = time.monotonic()
         try:
-            result = fn(self, inputs, *args, **kwargs)
+            result, attempts = _run_with_retry(self, fn, inputs, args, kwargs)
         except Exception as exc:
             if project_dir is not None:
                 emit_event(project_dir, {
@@ -221,6 +316,9 @@ def _instrument_execute(fn: Callable) -> Callable:
                 # NOTE: 0.0 is meaningful (ran for free) — only None is dropped.
                 "cost_usd": cost if isinstance(cost, (int, float)) else None,
                 "duration_s": round(time.monotonic() - started, 2),
+                # Only when a retry actually happened — keeps the common
+                # event shape unchanged.
+                **({"attempts": attempts} if attempts > 1 else {}),
             })
         return result
 
@@ -359,9 +457,23 @@ class BaseTool(ABC):
                     )
             elif dep.startswith("python:"):
                 module_name = dep[7:]
+                # find_spec, not __import__: this only has to answer "is it
+                # installed?", and IMPORTING to find out is ruinous here.
+                # Seven tools declare python:torch / python:cv2 /
+                # python:transformers, and the registry's preflight surfaces
+                # (support_envelope, provider_menu, get_by_status) call
+                # get_status() on EVERY tool — so rendering a capability menu
+                # on a machine with torch installed paid multi-second imports
+                # and hundreds of MB of RSS just to list what's available
+                # (audit 2026-07-15, finding 6). find_spec consults the
+                # finders without executing the module.
                 try:
-                    __import__(module_name)
-                except ImportError:
+                    found = importlib.util.find_spec(module_name) is not None
+                except (ImportError, ValueError):
+                    # A namespace package whose parent is missing raises
+                    # rather than returning None — treat as absent.
+                    found = False
+                if not found:
                     raise DependencyError(
                         f"Python module {module_name!r} not installed. {self.install_instructions}"
                     )

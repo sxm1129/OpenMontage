@@ -88,8 +88,14 @@ def build_shot_prompt(
     Args:
         scene: Scene dict from scene_plan (with shot_language, description,
                texture_keywords, etc.)
-        style_context: Optional playbook-derived style info with keys like
-                       'generation_prefix', 'visual_language', 'mood'.
+        style_context: Optional playbook-derived style info. Reads
+                       `visual_language.aesthetic`, falling back to `mood`.
+                       Deliberately does NOT take a verbatim prompt prefix
+                       (see "Layer 5" below): pasting the playbook's
+                       image_prompt_prefix onto every shot is what makes a
+                       whole video's imagery look identical. This docstring
+                       used to advertise a `generation_prefix` key that the
+                       code never read, so an agent passing it got silence.
 
     Returns:
         A natural-language prompt optimized for image/video generation.
