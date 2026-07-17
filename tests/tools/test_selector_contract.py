@@ -184,17 +184,20 @@ class TestDocumentedDivergences:
     silently — the plan's D1/D2/D4.
     """
 
-    def test_d1_supports_key_present_in_video_and_image_rank_items_not_tts(self, monkeypatch):
-        for cls, prompt_key, expected in (
-            (VideoSelector, "prompt", True),
-            (ImageSelector, "prompt", True),
-            (TTSSelector, "text", False),
+    def test_d1_all_rank_items_now_carry_supports(self, monkeypatch):
+        # D1 CONVERGED by the SelectorBase extraction: tts's hand-copied
+        # _serialize_rankings omitted `supports` while video/image included
+        # it. The base emits it for all three — purely additive (no key
+        # removed), and an agent ranking TTS providers can now see what each
+        # one supports, same as the other two capabilities.
+        for cls, prompt_key in (
+            (VideoSelector, "prompt"), (ImageSelector, "prompt"), (TTSSelector, "text"),
         ):
             sel = cls()
             a = _FakeProvider("alpha_tool", "alpha")
             _patch_providers(monkeypatch, sel, [a])
             [item] = sel.execute({prompt_key: "x", "operation": "rank"}).data["rankings"]
-            assert ("supports" in item) is expected, f"{cls.__name__} supports={expected}"
+            assert "supports" in item, cls.__name__
 
     def test_d4_tts_and_video_forward_selector_keys_to_the_provider(self, monkeypatch):
         # tts passes `inputs` through RAW; video copies but still forwards

@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import os
 
-from tools.base_tool import BaseTool, ToolResult, ToolRuntime, ToolStability, ToolStatus, ToolTier
+from tools.base_tool import BaseTool, ToolRuntime, ToolStability, ToolTier
+from tools.selector_base import CustomWorkflowSelectorMixin, SelectorBase
 
 
-class VideoSelector(BaseTool):
+class VideoSelector(CustomWorkflowSelectorMixin, SelectorBase):
     name = "video_selector"
     version = "0.3.0"
     tier = ToolTier.GENERATE
@@ -132,123 +133,25 @@ class VideoSelector(BaseTool):
         },
     }
 
-    def _providers(self) -> list[BaseTool]:
-        """Auto-discover video generation providers from the registry."""
-        from tools.tool_registry import registry
-        registry.ensure_discovered()
-        return [t for t in registry.get_by_capability("video_generation")
-                if t.name != self.name]
+    # ── Discovery, scoring, rank mode and result decoration live in
+    # SelectorBase. video customizes the env-hint preference mapping, rank
+    # inputs, operation-readiness filtering and the reference-image upload —
+    # and never overrides execute() (see the base's docstring on double
+    # instrumentation).
+    _prompt_key = "prompt"
+    _default_operation = "text_to_video"
 
     @property
     def fallback_tools(self) -> list[str]:
-        """Dynamically built from discovered providers + image_selector as last resort."""
-        return [t.name for t in self._providers()] + ["image_selector"]
+        """Discovered providers, plus image_selector as a cross-capability
+        last resort (a still + Ken Burns beats no visual at all)."""
+        return super().fallback_tools + ["image_selector"]
 
-    @property
-    def provider_matrix(self) -> dict[str, dict[str, str]]:
-        """Built at runtime from each provider's best_for field."""
-        matrix = {}
-        for tool in self._providers():
-            strength = ", ".join(tool.best_for) if tool.best_for else tool.name
-            matrix[tool.provider] = {"tool": tool.name, "strength": strength}
-        return matrix
+    def _no_provider_error(self) -> str:
+        return "No video generation provider available."
 
-    def get_status(self) -> ToolStatus:
-        if any(tool.get_status() == ToolStatus.AVAILABLE for tool in self._providers()):
-            return ToolStatus.AVAILABLE
-        return ToolStatus.UNAVAILABLE
-
-    def estimate_cost(self, inputs: dict[str, object]) -> float:
-        candidates = self._filter_candidates(inputs, self._providers())
-        if not candidates:
-            return 0.0
-        tool, _ = self._select_best_tool(inputs, candidates, self._prepare_task_context(inputs))
-        return tool.estimate_cost(inputs) if tool else 0.0
-
-    def estimate_runtime(self, inputs: dict[str, object]) -> float:
-        candidates = self._providers()
-        if not candidates:
-            return 0.0
-        tool, _ = self._select_best_tool(inputs, candidates, self._prepare_task_context(inputs))
-        return tool.estimate_runtime(inputs) if tool else 0.0
-
-    def execute(self, inputs: dict[str, object]) -> ToolResult:
-        from lib.scoring import rank_providers
-
-        candidates = self._providers()
-
-        # Rank mode — return scored provider rankings without generating
-        if inputs.get("operation") == "rank":
-            rank_inputs = self._rank_inputs(inputs)
-            task_context = self._prepare_task_context(rank_inputs)
-            candidates = self._filter_candidates(rank_inputs, candidates)
-            rankings = rank_providers(candidates, task_context)
-            return ToolResult(
-                success=True,
-                data={
-                    "rankings": self._serialize_rankings(candidates, rankings),
-                    "explanation": "\n".join(r.explain() for r in rankings[:5]),
-                    "normalized_task_context": task_context,
-                },
-            )
-
-        # Normal generation — use scored selection
-        task_context = self._prepare_task_context(inputs)
-        tool, score = self._select_best_tool(inputs, candidates, task_context)
-        if tool is None:
-            return ToolResult(success=False, error="No video generation provider available.")
-
-        # Adapt input keys: stock tools use 'query' while generators use 'prompt'
-        adapted = dict(inputs)
-        if hasattr(tool, 'input_schema'):
-            required = tool.input_schema.get("properties", {})
-            if "query" in required and "query" not in adapted:
-                adapted["query"] = adapted.get("prompt", "")
-
-        # Auto-resolve reference_image_path to a URL for providers that need it
-        if adapted.get("operation") == "image_to_video" and adapted.get("reference_image_path"):
-            tool_props = getattr(tool, "input_schema", {}).get("properties", {})
-            # If the provider uses image_url (not reference_image_path), upload and convert
-            if "image_url" in tool_props and "image_url" not in adapted:
-                try:
-                    from tools.video._shared import upload_image_fal
-                    adapted["image_url"] = upload_image_fal(adapted["reference_image_path"])
-                except Exception as e:
-                    return ToolResult(success=False, error=f"Failed to upload reference image: {e}")
-
-        result = tool.execute(adapted)
-        if result.success:
-            result.data.setdefault("selected_tool", tool.name)
-            result.data["selected_provider"] = tool.provider
-            result.data["selection_reason"] = score.explain() if score else f"Selected {tool.provider} ({tool.name})"
-            if score:
-                result.data["provider_score"] = score.to_dict()
-            result.data.update(self._tool_context_payload(tool))
-            result.data["alternatives_considered"] = [
-                t.name for t in candidates
-                if t.name != tool.name and t.get_status().value == "available"
-            ]
-        return result
-
-    def _select_best_tool(
-        self,
-        inputs: dict[str, object],
-        candidates: list[BaseTool],
-        task_context: dict[str, object],
-    ) -> tuple[BaseTool | None, object]:
-        """Select the best provider using scored ranking.
-
-        Respects preferred_provider and environment hints as tie-breakers,
-        but the scoring engine drives the primary selection.
-        """
-        from lib.scoring import rank_providers, ProviderScore
-
-        preferred = inputs.get("preferred_provider", "auto")
-        allowed = set(inputs.get("allowed_providers") or [])
-        if allowed:
-            candidates = [tool for tool in candidates if tool.provider in allowed]
-        candidates = self._filter_candidates(inputs, candidates)
-
+    def _resolve_preferred(self, inputs: dict[str, object]) -> str:
+        preferred = str(inputs.get("preferred_provider", "auto"))
         env_hint = os.environ.get("VIDEO_GEN_LOCAL_MODEL", "").lower()
         env_map = {
             "wan2.1-1.3b": "wan",
@@ -259,71 +162,34 @@ class VideoSelector(BaseTool):
             "cogvideo-2b": "cogvideo",
         }
         if preferred == "auto" and env_hint in env_map:
-            preferred = env_map[env_hint]
+            return env_map[env_hint]
+        return preferred
 
-        rankings = rank_providers(candidates, task_context)
-
-        # Build tool lookup: provider → tool (first selectable per provider)
-        tool_by_provider: dict[str, BaseTool] = {}
-        for tool in candidates:
-            if tool.provider not in tool_by_provider and self._tool_selectable(tool, inputs):
-                tool_by_provider[tool.provider] = tool
-
-        # If a preferred provider is explicitly requested and available,
-        # boost it to the top unless its score is drastically worse.
-        if preferred != "auto":
-            for score in rankings:
-                if score.provider == preferred and score.provider in tool_by_provider:
-                    return tool_by_provider[score.provider], score
-
-        # Return the highest-scored available provider
-        for score in rankings:
-            if score.provider in tool_by_provider:
-                return tool_by_provider[score.provider], score
-
-        return None, None
-
-    def _prepare_task_context(self, inputs: dict[str, object]) -> dict[str, object]:
-        from lib.scoring import normalize_task_context
-
-        return normalize_task_context(
-            inputs.get("task_context", {}),
-            prompt=str(inputs.get("prompt", "")),
-            capability=self.capability,
-            operation=str(inputs.get("operation", "text_to_video")),
-        )
-
-    @staticmethod
-    def _rank_inputs(inputs: dict[str, object]) -> dict[str, object]:
+    def _rank_inputs(self, inputs: dict[str, object]) -> dict[str, object]:
         rank_inputs = dict(inputs)
         rank_inputs["operation"] = inputs.get("target_operation", "text_to_video")
         return rank_inputs
 
-    @staticmethod
-    def _tool_context_payload(tool: BaseTool) -> dict[str, object]:
-        info = tool.get_info()
-        return {
-            "selected_tool_agent_skills": info.get("agent_skills", []),
-            "required_agent_skills": info.get("agent_skills", []),
-            "selected_tool_usage_location": info.get("usage_location"),
-            "selected_tool_best_for": info.get("best_for", []),
-        }
+    def _adapt_inputs(self, inputs: dict[str, object], tool: BaseTool) -> dict[str, object]:
+        """Add `query` for stock providers and resolve a local reference image
+        to a URL for providers that take one.
 
-    def _serialize_rankings(self, candidates: list[BaseTool], rankings: list[object]) -> list[dict[str, object]]:
-        tool_by_name = {tool.name: tool for tool in candidates}
-        serialized: list[dict[str, object]] = []
-        for score in rankings:
-            item = score.to_dict()
-            tool = tool_by_name.get(score.tool_name)
-            if tool:
-                info = tool.get_info()
-                item["agent_skills"] = info.get("agent_skills", [])
-                item["usage_location"] = info.get("usage_location")
-                item["best_for"] = info.get("best_for", [])
-                item["supports"] = info.get("supports", {})
-                item["status"] = str(tool.get_status())
-            serialized.append(item)
-        return serialized
+        Note this still forwards preferred_provider/allowed_providers to the
+        provider (unlike image_selector, which strips them) — preserved
+        deliberately; see SelectorBase._adapt_inputs.
+        """
+        adapted = dict(inputs)
+        if hasattr(tool, "input_schema"):
+            props = tool.input_schema.get("properties", {})
+            if "query" in props and "query" not in adapted:
+                adapted["query"] = adapted.get("prompt", "")
+
+        if adapted.get("operation") == "image_to_video" and adapted.get("reference_image_path"):
+            tool_props = getattr(tool, "input_schema", {}).get("properties", {})
+            if "image_url" in tool_props and "image_url" not in adapted:
+                from tools.video._shared import upload_image_fal
+                adapted["image_url"] = upload_image_fal(adapted["reference_image_path"])
+        return adapted
 
     def _filter_candidates(
         self,
@@ -371,31 +237,3 @@ class VideoSelector(BaseTool):
         if not callable(checker):
             return True
         return bool(checker(operation))
-
-    @staticmethod
-    def _has_custom_workflow(inputs: dict[str, object]) -> bool:
-        return bool(inputs.get("workflow_json") or inputs.get("workflow_path"))
-
-    def _custom_workflow_eligible(self, tool: BaseTool, inputs: dict[str, object]) -> bool:
-        """Whether a tool can run the caller-supplied custom workflow.
-
-        Eligibility is based on server availability, not bundled-model readiness:
-        a provider qualifies when it advertises ``custom_workflow`` support, an
-        ``output_node`` is supplied, and its backend is reachable (status is not
-        UNAVAILABLE).
-        """
-        if not self._has_custom_workflow(inputs):
-            return False
-        if not inputs.get("output_node"):
-            return False
-        supports = getattr(tool, "supports", {})
-        if not supports.get("custom_workflow"):
-            return False
-        return tool.get_status() != ToolStatus.UNAVAILABLE
-
-    def _tool_selectable(self, tool: BaseTool, inputs: dict[str, object]) -> bool:
-        """A provider is selectable if it is AVAILABLE, or if it can serve a
-        caller-supplied custom workflow even while bundled models report DEGRADED."""
-        if tool.get_status() == ToolStatus.AVAILABLE:
-            return True
-        return self._custom_workflow_eligible(tool, inputs)
