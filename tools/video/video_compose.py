@@ -1167,175 +1167,24 @@ class VideoCompose(BaseTool):
 
     @staticmethod
     def _is_light_hex(color: str) -> bool:
-        """Rough perceptual lightness test for a #RRGGBB background."""
-        v = (color or "").lstrip("#")
-        if len(v) < 6:
-            return False
-        try:
-            r, g, b = (int(v[i:i + 2], 16) for i in (0, 2, 4))
-        except ValueError:
-            return False
-        return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 140
+        """See compose_theme._is_light_hex."""
+        from tools.video.compose_theme import _is_light_hex
+        return _is_light_hex(color)
 
     @staticmethod
-    def _pick_caption_highlight(
-        candidates: list[str], scrim_hex: str, light_bg: bool
-    ) -> str:
-        """First candidate that clears WCAG large-text contrast on the scrim.
-
-        Uses styles.playbook_loader.validate_contrast — the playbook
-        intelligence layer's own validator, which until now had no production
-        caller at all (audit 2026-07-15, structural item 3). Captions are
-        large, bold text, so 3:1 (AA large) is the right floor. Falls back to
-        a guaranteed-legible neutral rather than shipping an invisible
-        highlight.
-        """
-        try:
-            from styles.playbook_loader import validate_contrast
-        except Exception:
-            return candidates[0] if candidates else "#22D3EE"
-        for c in candidates:
-            if not c:
-                continue
-            try:
-                if validate_contrast(c, scrim_hex)["large_text"]["AA"]:
-                    return c
-            except Exception:
-                continue
-        return "#0F172A" if light_bg else "#F8FAFC"
+    def _pick_caption_highlight(candidates: list[str], scrim_hex: str, light_bg: bool) -> str:
+        """See compose_theme._pick_caption_highlight."""
+        from tools.video.compose_theme import _pick_caption_highlight
+        return _pick_caption_highlight(candidates, scrim_hex, light_bg)
 
     @staticmethod
     def _build_theme_from_playbook(
         playbook_name: str | None,
         composition_data: dict | None,
     ) -> dict[str, Any] | None:
-        """Derive a Remotion ThemeConfig from a playbook's actual color values.
-
-        Instead of passing a playbook name and hoping Remotion has a matching
-        preset, we read the playbook YAML and extract concrete colors/fonts.
-        This means custom playbooks, overridden palettes, and per-project
-        styles all flow through to Remotion automatically.
-
-        Falls back to extracting colors from edit_decisions metadata if
-        no playbook is loadable.
-        """
-        theme: dict[str, Any] = {}
-
-        # Try to load the playbook YAML
-        playbook: dict[str, Any] = {}
-        if playbook_name:
-            try:
-                from styles.playbook_loader import load_playbook
-                playbook = load_playbook(playbook_name)
-            except Exception:
-                pass
-
-        if playbook:
-            vl = playbook.get("visual_language", {})
-            palette = vl.get("color_palette", {})
-            typo = playbook.get("typography", {})
-
-            # Extract primary/accent — may be a list (gradient stops) or string
-            primary_raw = palette.get("primary", ["#2563EB"])
-            accent_raw = palette.get("accent", ["#F59E0B"])
-            primary = primary_raw[0] if isinstance(primary_raw, list) else primary_raw
-            accent = accent_raw[0] if isinstance(accent_raw, list) else accent_raw
-
-            bg = palette.get("background", "#FFFFFF")
-            text = palette.get("text", "#1F2937")
-            surface = palette.get("surface", bg)
-            # Schema key is `muted` — the old `muted_text` lookup never
-            # matched any playbook, so the muted color silently stayed at
-            # the default for every render (audit 2026-07-16, Wave 1 ⑤).
-            muted = palette.get("muted") or palette.get("muted_text", "#6B7280")
-
-            # Build chart colors from all palette entries
-            chart_colors = []
-            for key in ["primary", "accent", "secondary", "success", "warning", "info"]:
-                val = palette.get(key)
-                if val:
-                    chart_colors.append(val[0] if isinstance(val, list) else val)
-            if len(chart_colors) < 3:
-                chart_colors = [primary, accent, "#10B981", "#8B5CF6", "#EC4899", "#06B6D4"]
-
-            theme = {
-                "primaryColor": primary,
-                "accentColor": accent,
-                "backgroundColor": bg,
-                "surfaceColor": surface,
-                "textColor": text,
-                "mutedTextColor": muted,
-                # Schema key is `headings` (plural, see playbook.schema.json's
-                # typography block) — the old singular `heading` lookup never
-                # matched, so headingFont fell back to Inter for EVERY
-                # playbook and theme typography was fiction.
-                "headingFont": (typo.get("headings") or typo.get("heading") or {}).get("font", "Inter"),
-                "bodyFont": typo.get("body", {}).get("font", "Inter"),
-                "monoFont": typo.get("code", {}).get("font", "JetBrains Mono"),
-                "chartColors": chart_colors[:6],
-                "springConfig": {"damping": 20, "stiffness": 120, "mass": 1},
-                "transitionDuration": 0.4,
-            }
-
-            # Caption background: semi-transparent scrim matching the theme.
-            light_bg = VideoCompose._is_light_hex(bg)
-            caption_bg_hex = "#FFFFFF" if light_bg else "#0F172A"
-            theme["captionBackgroundColor"] = (
-                "rgba(255, 255, 255, 0.85)" if light_bg else "rgba(15, 23, 42, 0.75)"
-            )
-            # The active-word highlight must POP against that scrim — that IS
-            # its whole job. It used to be hardcoded to `primary`, which for a
-            # dark-primary playbook meant an invisible highlight: anime-ghibli
-            # rendered #2D5016 forest green on the #0F172A scrim — 1.93:1,
-            # below even the 3:1 WCAG large-text floor, while the playbook's
-            # own accent (#FFB347) scores 10.02:1. Root.tsx's hand-authored
-            # THEMES already use accent for exactly this, so the bridge was
-            # contradicting the theme it exists to reproduce (found by E2E
-            # render inspection, 2026-07-17). Pick the first candidate that
-            # actually passes, via the contrast validator the playbook
-            # intelligence layer already ships.
-            theme["captionHighlightColor"] = VideoCompose._pick_caption_highlight(
-                [accent, primary], caption_bg_hex, light_bg
-            )
-
-            # Motion style from the playbook's pace. The schema puts pace
-            # under identity.pace (slow/gentle/deliberate/moderate/fast/
-            # rapid) — the old `motion.pace` lookup matched nothing, so this
-            # branch never fired for any playbook.
-            pace = (
-                playbook.get("identity", {}).get("pace")
-                or playbook.get("motion", {}).get("pace")
-                or "moderate"
-            )
-            if pace in ("fast", "rapid"):
-                theme["springConfig"] = {"damping": 12, "stiffness": 80, "mass": 1}
-                theme["transitionDuration"] = 0.3
-            elif pace in ("slow", "gentle", "deliberate"):
-                theme["springConfig"] = {"damping": 25, "stiffness": 150, "mass": 1}
-                theme["transitionDuration"] = 0.6
-
-        # Fallback: try to extract from edit_decisions metadata
-        if not theme and composition_data:
-            meta = composition_data.get("metadata", {})
-            if meta.get("primary_color"):
-                theme = {
-                    "primaryColor": meta["primary_color"],
-                    "accentColor": meta.get("accent_color", "#F59E0B"),
-                    "backgroundColor": meta.get("background_color", "#FFFFFF"),
-                    "surfaceColor": meta.get("surface_color", "#F9FAFB"),
-                    "textColor": meta.get("text_color", "#1F2937"),
-                    "mutedTextColor": "#6B7280",
-                    "headingFont": meta.get("heading_font", "Inter"),
-                    "bodyFont": meta.get("body_font", "Inter"),
-                    "monoFont": "JetBrains Mono",
-                    "chartColors": meta.get("chart_colors", ["#2563EB", "#F59E0B", "#10B981"]),
-                    "springConfig": {"damping": 20, "stiffness": 120, "mass": 1},
-                    "transitionDuration": 0.4,
-                    "captionHighlightColor": meta["primary_color"],
-                    "captionBackgroundColor": "rgba(255, 255, 255, 0.85)",
-                }
-
-        return theme if theme else None
+        """See compose_theme._build_theme_from_playbook."""
+        from tools.video.compose_theme import _build_theme_from_playbook
+        return _build_theme_from_playbook(playbook_name, composition_data)
 
     def _needs_remotion(self, cuts: list[dict]) -> bool:
         """Determine whether Remotion should handle this composition.
@@ -2115,143 +1964,19 @@ class VideoCompose(BaseTool):
     # "hyphen", those leak into the transcript. Catching these in the final
     # review is the difference between catching a bad voice render in-tool
     # vs. shipping a video that says "dot dot dot" twelve times. CRITICAL.
-    _TTS_PUNCTUATION_LEAK_WORDS = {
-        "dot", "dots", "ellipsis", "period", "periods",
-        "comma", "commas", "semicolon", "colon",
-        "dash", "hyphen", "emdash", "endash",
-        "parenthesis", "bracket", "brace",
-        "asterisk", "slash", "backslash",
-        "exclamation", "question mark",
-    }
 
     @staticmethod
     def _read_text_file(path: str | Path | None) -> str | None:
-        """Read a small text file if given a path; None-safe and exception-safe."""
-        if not path:
-            return None
-        try:
-            return Path(path).read_text(encoding="utf-8")
-        except Exception:
-            return None
+        """See compose_review._read_text_file."""
+        from tools.video.compose_review import _read_text_file
+        return _read_text_file(path)
 
-    @classmethod
-    def _tokenize(cls, text: str) -> list[str]:
-        """Split text into comparable word tokens (lowercased, punctuation
-        stripped, numeric-word-aware). Empty tokens dropped."""
-        import re
 
-        # Preserve hyphenated words as single tokens ("many-worlds" -> "many-worlds").
-        # Drop everything except letters, digits, hyphens, apostrophes.
-        cleaned = re.sub(r"[^A-Za-z0-9\-' ]+", " ", text.lower())
-        return [t for t in cleaned.split() if t and t != "-"]
-
-    @classmethod
-    def _compare_transcript_to_script(
-        cls,
-        transcript_path: Path,
-        script_text: str,
-    ) -> dict[str, Any]:
-        """Compare a word-level transcript against the source script.
-
-        Purpose: catch TTS failures that look fine on audio-volume/duration
-        checks but produce garbage content. The canonical example is
-        Chirp3-HD reading ellipses ("...") literally as the word "dot" — our
-        volume check says "narration present, not clipped" and the video
-        ships. This check diffs the actual transcribed audio against what
-        was supposed to be said, and flags:
-
-        - Spurious punctuation-leak words ("dot", "comma", "hyphen", etc.)
-          that appear in audio but not script → CRITICAL
-        - Overall word-accuracy ratio against script → SUGGESTION if < 0.9
-
-        Returns the transcript_comparison section of final_review, or a
-        placeholder with an issue describing why the check couldn't run
-        (missing transcript, missing script) so the review never goes
-        silently quiet on this contract.
-        """
-        result: dict[str, Any] = {
-            "transcript_matches_script": False,
-            "word_accuracy": None,
-            "script_word_count": 0,
-            "transcript_word_count": 0,
-            "spurious_punctuation_words": [],
-            "issues": [],
-        }
-
-        if not transcript_path or not Path(transcript_path).is_file():
-            result["issues"].append(
-                "transcript_comparison skipped: narration_transcript not provided"
-            )
-            return result
-        if not script_text:
-            result["issues"].append(
-                "transcript_comparison skipped: script_text not provided"
-            )
-            return result
-
-        try:
-            transcript_data = json.loads(Path(transcript_path).read_text(encoding="utf-8"))
-        except Exception as e:
-            result["issues"].append(f"transcript_comparison could not parse transcript: {e}")
-            return result
-
-        transcript_words = [
-            w.get("word", "").strip() for w in transcript_data.get("word_timestamps", [])
-        ]
-        transcript_tokens = cls._tokenize(" ".join(transcript_words))
-        script_tokens = cls._tokenize(script_text)
-
-        result["script_word_count"] = len(script_tokens)
-        result["transcript_word_count"] = len(transcript_tokens)
-
-        if not script_tokens or not transcript_tokens:
-            result["issues"].append(
-                f"transcript_comparison: empty token set "
-                f"(script={len(script_tokens)}, transcript={len(transcript_tokens)})"
-            )
-            return result
-
-        # --- Punctuation-leak detection (TTS reading literal punctuation) ---
-        script_set = set(script_tokens)
-        leak_occurrences: dict[str, int] = {}
-        for token in transcript_tokens:
-            if token in cls._TTS_PUNCTUATION_LEAK_WORDS and token not in script_set:
-                leak_occurrences[token] = leak_occurrences.get(token, 0) + 1
-
-        if leak_occurrences:
-            formatted = ", ".join(
-                f"{w!r}×{n}" for w, n in sorted(leak_occurrences.items(), key=lambda x: -x[1])
-            )
-            result["spurious_punctuation_words"] = [
-                {"word": w, "count": n} for w, n in leak_occurrences.items()
-            ]
-            result["issues"].append(
-                f"TTS punctuation leak: transcript contains {formatted} — "
-                f"these words are NOT in the script, which means the voice "
-                f"engine is reading literal punctuation aloud. Rewrite the "
-                f"script to eliminate the corresponding characters (ellipses, "
-                f"em-dashes, etc.) and regenerate narration."
-            )
-
-        # --- Word accuracy via set overlap (cheap & ordering-insensitive) ---
-        # We don't penalize small word-order differences or minor TTS
-        # hallucinations; we just want to know "did 90%+ of the script's
-        # content make it into the audio." Using set overlap on the script
-        # side is robust to transcription noise.
-        matched = sum(1 for t in script_tokens if t in set(transcript_tokens))
-        accuracy = matched / max(1, len(script_tokens))
-        result["word_accuracy"] = round(accuracy, 3)
-        result["transcript_matches_script"] = accuracy >= 0.9 and not leak_occurrences
-
-        if accuracy < 0.9:
-            result["issues"].append(
-                f"Low transcript-to-script match: only {accuracy:.0%} of script "
-                f"words appear in the transcribed audio ({matched}/"
-                f"{len(script_tokens)}). Narration may be truncated, mispronounced, "
-                f"or the wrong script was used."
-            )
-
-        return result
+    @staticmethod
+    def _compare_transcript_to_script(transcript_path, script_text):
+        """See compose_review._compare_transcript_to_script."""
+        from tools.video.compose_review import _compare_transcript_to_script
+        return _compare_transcript_to_script(transcript_path, script_text)
 
     def _run_final_review(
         self,
@@ -2261,452 +1986,13 @@ class VideoCompose(BaseTool):
         narration_transcript_path: str | Path | None = None,
         script_text: str | None = None,
     ) -> dict[str, Any]:
-        """Run post-render self-review and produce a final_review artifact.
-
-        This is the governance contract: the compose runtime MUST inspect
-        the actual rendered output before marking the stage complete.
-        Never claim a video is ready without a real probe + frame sample.
-
-        When `proposal_packet` is provided, its
-        `production_plan.render_runtime` is compared against
-        `edit_decisions.render_runtime` so `runtime_swap_detected` can
-        actually flip. Without it, we fall back to
-        `edit_decisions.metadata.proposal_render_runtime` (which the edit
-        director can set explicitly to opt into swap detection).
-
-        Returns a dict conforming to final_review.schema.json.
-        """
-        log = logging.getLogger("video_compose.final_review")
-        issues: list[str] = []
-
-        # --- 1. Technical probe via ffprobe ---
-        technical_probe: dict[str, Any] = {
-            "valid_container": False,
-            "issues": [],
-        }
-        try:
-            cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_format", "-show_streams", str(output_path),
-            ]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if proc.returncode == 0:
-                probe_data = json.loads(proc.stdout)
-                fmt = probe_data.get("format", {})
-                streams = probe_data.get("streams", [])
-                video_stream = next(
-                    (s for s in streams if s.get("codec_type") == "video"), {}
-                )
-                audio_stream = next(
-                    (s for s in streams if s.get("codec_type") == "audio"), {}
-                )
-
-                duration = float(fmt.get("duration", 0))
-                width = int(video_stream.get("width", 0))
-                height = int(video_stream.get("height", 0))
-                fps_str = video_stream.get("r_frame_rate", "0/1")
-                fps = self._parse_probe_fps(fps_str)
-
-                technical_probe = {
-                    "valid_container": bool(video_stream),
-                    "duration_seconds": round(duration, 2),
-                    "resolution": f"{width}x{height}",
-                    "fps": fps,
-                    "has_audio": bool(audio_stream),
-                    "codec": video_stream.get("codec_name", "unknown"),
-                    "file_size_bytes": int(fmt.get("size", 0)),
-                    "issues": [],
-                }
-
-                # Sanity checks
-                if duration < 1.0:
-                    technical_probe["issues"].append(
-                        f"Output is only {duration:.1f}s — suspiciously short"
-                    )
-
-                # Check target duration from edit_decisions
-                target_dur = None
-                if edit_decisions:
-                    target_dur = (
-                        edit_decisions.get("total_duration_seconds")
-                        or edit_decisions.get("metadata", {}).get("target_duration_seconds")
-                    )
-                if target_dur and target_dur > 0:
-                    drift_pct = abs(duration - target_dur) / target_dur
-                    if drift_pct > 0.25:
-                        technical_probe["issues"].append(
-                            f"Duration drift: rendered {duration:.1f}s vs target {target_dur}s "
-                            f"({drift_pct:.0%} off). Review pacing or trim."
-                        )
-                    elif drift_pct > 0.05:
-                        # Manifests promise ±5%; the old 25%-only check was
-                        # 5× looser than the contract (Wave 2, item 13).
-                        technical_probe["issues"].append(
-                            f"Duration drift {drift_pct:.0%} (rendered {duration:.1f}s "
-                            f"vs target {target_dur}s) exceeds the ±5% manifest promise"
-                        )
-                    technical_probe["target_duration"] = target_dur
-                    technical_probe["duration_drift_pct"] = round(drift_pct * 100, 1)
-                if width < 320 or height < 240:
-                    technical_probe["issues"].append(
-                        f"Resolution {width}x{height} is very low"
-                    )
-                if not audio_stream:
-                    technical_probe["issues"].append("No audio stream in output")
-            else:
-                technical_probe["issues"].append(
-                    f"ffprobe failed with exit code {proc.returncode}"
-                )
-        except FileNotFoundError:
-            technical_probe["issues"].append("ffprobe not found — cannot validate output")
-        except Exception as e:
-            technical_probe["issues"].append(f"ffprobe error: {e}")
-
-        issues.extend(technical_probe.get("issues", []))
-
-        # --- 2. Visual spotcheck: sample 4 frames ---
-        visual_spotcheck: dict[str, Any] = {
-            "frames_sampled": 0,
-            "frame_paths": [],
-            "black_frames_detected": False,
-            # Honest reporting (audit 2026-07-16, Wave 2 item 11): these used
-            # to be hardcoded False — "checked and passed" — when no check
-            # existed. None = not checked; the agent-facing review skill must
-            # eyeball the sampled frames for overlays/text legibility until a
-            # VLM check lands.
-            "broken_overlays": None,
-            "missing_assets": None,
-            "unreadable_text": None,
-            "not_checked": ["broken_overlays", "missing_assets", "unreadable_text"],
-            "issues": [],
-        }
-        duration = technical_probe.get("duration_seconds", 0)
-        if duration > 0 and technical_probe.get("valid_container"):
-            try:
-                frame_dir = output_path.parent / ".final_review_frames"
-                frame_dir.mkdir(parents=True, exist_ok=True)
-                # Sample at 10%, 35%, 65%, 90% of duration
-                sample_points = [0.10, 0.35, 0.65, 0.90]
-                frame_paths = []
-                for i, pct in enumerate(sample_points):
-                    ts = round(duration * pct, 2)
-                    frame_path = frame_dir / f"review_frame_{i}.png"
-                    cmd = [
-                        "ffmpeg", "-y", "-ss", str(ts),
-                        "-i", str(output_path),
-                        "-frames:v", "1", "-q:v", "2",
-                        str(frame_path),
-                    ]
-                    subprocess.run(cmd, capture_output=True, timeout=15)
-                    if frame_path.exists():
-                        frame_paths.append(str(frame_path))
-
-                        # Check for black frames (file size heuristic:
-                        # a 1920x1080 PNG of pure black is ~5KB)
-                        if frame_path.stat().st_size < 2000:
-                            visual_spotcheck["black_frames_detected"] = True
-
-                visual_spotcheck["frames_sampled"] = len(frame_paths)
-                visual_spotcheck["frame_paths"] = frame_paths
-
-                if len(frame_paths) < 4:
-                    visual_spotcheck["issues"].append(
-                        f"Only {len(frame_paths)}/4 frames extracted — some timestamps may be out of range"
-                    )
-                if visual_spotcheck["black_frames_detected"]:
-                    visual_spotcheck["issues"].append(
-                        "Black frame detected — possible missing asset or failed render segment"
-                    )
-            except Exception as e:
-                visual_spotcheck["issues"].append(f"Frame sampling error: {e}")
-
-        issues.extend(visual_spotcheck.get("issues", []))
-
-        # --- 3. Audio spotcheck ---
-        audio_spotcheck: dict[str, Any] = {
-            "narration_present": False,
-            "music_present": False,
-            "unexpected_silence": False,
-            "clipping_detected": False,
-            "mix_intelligible": True,
-            "issues": [],
-        }
-        if technical_probe.get("has_audio") and duration > 0:
-            try:
-                # Use ffmpeg volumedetect to check audio levels
-                cmd = [
-                    "ffmpeg", "-i", str(output_path),
-                    "-af", "volumedetect", "-f", "null", "-",
-                ]
-                proc = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=60
-                )
-                stderr = proc.stderr or ""
-                # Parse mean_volume and max_volume
-                mean_vol = None
-                max_vol = None
-                for line in stderr.split("\n"):
-                    if "mean_volume:" in line:
-                        try:
-                            mean_vol = float(line.split("mean_volume:")[1].strip().split()[0])
-                        except (ValueError, IndexError):
-                            pass
-                    if "max_volume:" in line:
-                        try:
-                            max_vol = float(line.split("max_volume:")[1].strip().split()[0])
-                        except (ValueError, IndexError):
-                            pass
-
-                if mean_vol is not None:
-                    if mean_vol < -60:
-                        audio_spotcheck["unexpected_silence"] = True
-                        audio_spotcheck["issues"].append(
-                            f"Mean volume {mean_vol:.1f} dB — effectively silent"
-                        )
-                    # Assume narration present if mean volume is reasonable
-                    if mean_vol > -40:
-                        audio_spotcheck["narration_present"] = True
-                    # Assume music present if audio exists (conservative)
-                    if mean_vol > -50:
-                        audio_spotcheck["music_present"] = True
-
-                if max_vol is not None and max_vol > -0.5:
-                    audio_spotcheck["clipping_detected"] = True
-                    audio_spotcheck["issues"].append(
-                        f"Max volume {max_vol:.1f} dB — possible clipping"
-                    )
-            except Exception as e:
-                audio_spotcheck["issues"].append(f"Audio analysis error: {e}")
-
-        issues.extend(audio_spotcheck.get("issues", []))
-
-        # --- 3.5 Perceptual scan: full-program black/freeze/silence/loudness ---
-        # Whether the edit actually asked for audio — silence is only a
-        # defect then (_compose injects a silent track for soundless
-        # sources, so a deliberately audio-free composition is legitimate).
-        audio_expected = any(
-            (edit_decisions or {}).get(k) for k in ("audio", "music", "narration")
+        """See compose_review._run_final_review — kept as a method so every
+        existing call site and subclass override point is unchanged."""
+        from tools.video.compose_review import _run_final_review
+        return _run_final_review(
+            output_path, edit_decisions, proposal_packet,
+            narration_transcript_path, script_text,
         )
-        perceptual_scan = self._perceptual_scan(
-            output_path,
-            duration,
-            audio_expected=audio_expected,
-            has_audio=bool(technical_probe.get("has_audio")),
-        )
-        issues.extend(perceptual_scan.get("issues", []))
-
-        # --- 4. Promise preservation ---
-        promise_preservation: dict[str, Any] = {
-            "delivery_promise_honored": True,
-            "silent_downgrade_detected": False,
-            "runtime_swap_detected": False,
-            "issues": [],
-        }
-        if edit_decisions:
-            renderer_family = edit_decisions.get("renderer_family", "")
-            promise_preservation["renderer_family_used"] = renderer_family
-
-            # Runtime governance — record what actually ran and flag a swap.
-            # Three sources of truth, in priority order:
-            #   1. proposal_packet.production_plan.render_runtime (authoritative)
-            #   2. edit_decisions.metadata.proposal_render_runtime (if edit stage
-            #      explicitly copied it to opt into in-tool swap detection)
-            #   3. edit_decisions.render_runtime itself (cannot detect a swap in
-            #      this case — reviewer does cross-artifact comparison instead)
-            render_runtime_edit = (edit_decisions.get("render_runtime") or "").strip().lower()
-            if render_runtime_edit:
-                promise_preservation["render_runtime_used"] = render_runtime_edit
-
-                proposal_runtime: str | None = None
-                runtime_source: str | None = None
-                if proposal_packet:
-                    pp_runtime = (
-                        (proposal_packet.get("production_plan") or {}).get("render_runtime")
-                        or ""
-                    ).strip().lower()
-                    if pp_runtime:
-                        proposal_runtime = pp_runtime
-                        runtime_source = "proposal_packet.production_plan.render_runtime"
-                if proposal_runtime is None:
-                    md_runtime = (
-                        (edit_decisions.get("metadata") or {}).get("proposal_render_runtime")
-                        or ""
-                    ).strip().lower()
-                    if md_runtime:
-                        proposal_runtime = md_runtime
-                        runtime_source = "edit_decisions.metadata.proposal_render_runtime"
-
-                if proposal_runtime is None:
-                    promise_preservation["runtime_swap_check"] = (
-                        "skipped — no proposal_packet or proposal_render_runtime "
-                        "metadata provided. Reviewer skill does cross-artifact "
-                        "comparison separately."
-                    )
-                elif proposal_runtime != render_runtime_edit:
-                    promise_preservation["runtime_swap_detected"] = True
-                    promise_preservation["runtime_swap_check"] = (
-                        f"detected — source: {runtime_source}"
-                    )
-                    promise_preservation["issues"].append(
-                        f"render_runtime changed between proposal ({proposal_runtime}) "
-                        f"and compose ({render_runtime_edit}) — this is a contract "
-                        f"violation unless a render_runtime_selection decision was logged."
-                    )
-                else:
-                    promise_preservation["runtime_swap_check"] = (
-                        f"ok — proposal and edit agree ({runtime_source})"
-                    )
-
-            delivery_data = (
-                edit_decisions.get("metadata", {}).get("delivery_promise")
-                or edit_decisions.get("delivery_promise")
-            )
-            if delivery_data:
-                try:
-                    from lib.delivery_promise import DeliveryPromise
-                    promise = DeliveryPromise.from_dict(delivery_data)
-                    cuts = edit_decisions.get("cuts", [])
-                    result = promise.validate_cuts(cuts)
-                    motion_ratio = result.get("motion_ratio", 0)
-                    promise_preservation["motion_ratio_actual"] = round(motion_ratio, 3)
-
-                    if not result["valid"]:
-                        promise_preservation["delivery_promise_honored"] = False
-                        for v in result["violations"]:
-                            promise_preservation["issues"].append(v)
-
-                    # Detect silent downgrade: motion-led promise but <50% motion
-                    if (delivery_data.get("type") == "motion_led"
-                            and motion_ratio < 0.5):
-                        promise_preservation["silent_downgrade_detected"] = True
-                        promise_preservation["issues"].append(
-                            f"Motion-led promise but only {motion_ratio:.0%} motion — "
-                            f"silent downgrade to still-led"
-                        )
-                except Exception as e:
-                    promise_preservation["issues"].append(
-                        f"Could not validate delivery promise: {e}"
-                    )
-
-        issues.extend(promise_preservation.get("issues", []))
-
-        # --- 5. Subtitle check ---
-        subtitle_check: dict[str, Any] = {
-            "subtitles_expected": False,
-            "subtitles_present": False,
-            "issues": [],
-        }
-        if edit_decisions:
-            ed_subs = edit_decisions.get("subtitles", {})
-            subtitle_check["subtitles_expected"] = bool(ed_subs.get("enabled"))
-
-            # Check if output has subtitle stream
-            if technical_probe.get("valid_container"):
-                try:
-                    cmd = [
-                        "ffprobe", "-v", "quiet", "-print_format", "json",
-                        "-show_streams", "-select_streams", "s",
-                        str(output_path),
-                    ]
-                    proc = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=15
-                    )
-                    if proc.returncode == 0:
-                        sub_data = json.loads(proc.stdout)
-                        sub_streams = sub_data.get("streams", [])
-                        subtitle_check["subtitles_present"] = len(sub_streams) > 0
-
-                    # If subtitles were expected but not found as a stream,
-                    # they may be burned in (which is fine — not a failure)
-                    if (subtitle_check["subtitles_expected"]
-                            and not subtitle_check["subtitles_present"]):
-                        # Check if subtitle_path was used (burned in)
-                        sub_source = ed_subs.get("source")
-                        if sub_source and Path(sub_source).exists():
-                            # Burned-in subtitles are not detectable as streams
-                            subtitle_check["subtitles_present"] = True
-                            subtitle_check["coverage_ratio"] = 1.0
-                        else:
-                            subtitle_check["issues"].append(
-                                "Subtitles expected but not found in output and "
-                                "no subtitle source file exists for burn-in"
-                            )
-                except Exception as e:
-                    subtitle_check["issues"].append(f"Subtitle check error: {e}")
-
-        issues.extend(subtitle_check.get("issues", []))
-
-        # --- 6. Transcript-vs-script comparison ---
-        # Catches content-level TTS failures (the classic "Chirp reads `...`
-        # as the word 'dot'" trap) that volume-based audio checks miss.
-        # Only runs when caller provides both the transcript and script; when
-        # skipped, issues list records that so the silence is visible.
-        transcript_comparison = self._compare_transcript_to_script(
-            Path(narration_transcript_path) if narration_transcript_path else None,
-            script_text,
-        )
-        issues.extend(transcript_comparison.get("issues", []))
-
-        # --- 7. Determine overall status ---
-        critical_issues = [
-            i for i in issues
-            if any(kw in i.lower() for kw in [
-                "silent downgrade", "delivery promise violation",
-                "effectively silent", "ffprobe failed", "suspiciously short",
-                "tts punctuation leak",  # reading literal punctuation aloud
-            ])
-        ]
-
-        if critical_issues:
-            status = "revise"
-            recommended_action = "re_render"
-        elif issues:
-            status = "pass"
-            recommended_action = "present_to_user"
-        else:
-            status = "pass"
-            recommended_action = "present_to_user"
-
-        # Objectively-unusable deliverables are a hard FAIL, not a "revise"
-        # suggestion. A video whose audio track is effectively silent used to
-        # sail through as success=True with a note in data that nothing was
-        # obliged to read (audit 2026-07-16, Wave 1 ⑦). Silence only counts
-        # as unusable when the edit actually ASKED for audio (audio_expected,
-        # computed at the perceptual scan above).
-        _fail_keywords = ["ffprobe failed"]
-        if audio_expected:
-            _fail_keywords += ["effectively silent", "no audio stream"]
-        if any(any(kw in i.lower() for kw in _fail_keywords) for i in issues):
-            status = "fail"
-            recommended_action = "re_render"
-
-        if not technical_probe.get("valid_container"):
-            status = "fail"
-            recommended_action = "re_render"
-
-        final_review = {
-            "version": "1.0",
-            "output_path": str(output_path),
-            "status": status,
-            "checks": {
-                "technical_probe": technical_probe,
-                "visual_spotcheck": visual_spotcheck,
-                "audio_spotcheck": audio_spotcheck,
-                "perceptual_scan": perceptual_scan,
-                "promise_preservation": promise_preservation,
-                "subtitle_check": subtitle_check,
-                "transcript_comparison": transcript_comparison,
-            },
-            "issues_found": issues,
-            "recommended_action": recommended_action,
-        }
-
-        log.info(
-            "Final review: status=%s, issues=%d, action=%s",
-            status, len(issues), recommended_action,
-        )
-
-        return final_review
 
     # Prop paths that reference a local media asset, as (container, key)
     # traversal rules. Kept explicit rather than "rewrite any string that
@@ -2967,118 +2253,25 @@ class VideoCompose(BaseTool):
             artifacts=[str(output_path)],
         )
 
+    @staticmethod
     def _perceptual_scan(
-        self,
         output_path: Path,
         duration: float,
         *,
         audio_expected: bool,
         has_audio: bool,
     ) -> dict[str, Any]:
-        """Full-program perceptual QA in ONE decode pass (audit 2026-07-16,
-        Wave 2 item 11): blackdetect + freezedetect on video, silencedetect +
-        ebur128 integrated loudness on audio. Replaces the 4-sampled-frames-
-        only coverage that let per-segment black frames, mid-program dead air
-        and loudness misses ship unnoticed.
-
-        Findings are advisory issues (thresholds tuned against legitimate
-        holds/fades); the status/fail policy stays in _run_final_review.
-        """
-        scan: dict[str, Any] = {
-            "ran": False,
-            "black_segments": [],
-            "freeze_segments": [],
-            "silence_gaps": [],
-            "integrated_lufs": None,
-            "issues": [],
-        }
-        if duration <= 0:
-            return scan
-
-        cmd = [
-            "ffmpeg", "-hide_banner", "-nostats", "-i", str(output_path),
-            # d=0.8: shorter dips are usually transitions. pix_th 0.10
-            # tolerates dark-but-alive footage. freezedetect d=5: static
-            # text-card holds are legitimate up to scene length; ≥5s of
-            # bit-identical frames deserves a human look.
-            "-vf", "blackdetect=d=0.8:pix_th=0.10,freezedetect=n=-60dB:d=5",
-        ]
-        if has_audio:
-            # -45dB/1.5s: real dead air, not a breath pause.
-            cmd += ["-af", "silencedetect=n=-45dB:d=1.5,ebur128"]
-        cmd += ["-f", "null", "-"]
-
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True,
-                timeout=max(120, int(duration * 3)),
-            )
-        except Exception as e:
-            scan["issues"].append(f"Perceptual scan error: {e}")
-            return scan
-        stderr = proc.stderr or ""
-        scan["ran"] = True
-
-        import re as _re
-
-        for m in _re.finditer(r"black_start:([\d.]+) black_end:([\d.]+)", stderr):
-            start, end = float(m.group(1)), float(m.group(2))
-            scan["black_segments"].append([round(start, 2), round(end, 2)])
-            # Head/tail dips are usually intentional fades — only flag
-            # mid-program blackness.
-            if start > 1.0 and end < duration - 1.5:
-                scan["issues"].append(
-                    f"Black segment {start:.1f}s-{end:.1f}s mid-program — "
-                    f"possible missing asset or failed render segment"
-                )
-
-        freeze_starts = [float(x) for x in _re.findall(r"freeze_start: ([\d.]+)", stderr)]
-        freeze_ends = [float(x) for x in _re.findall(r"freeze_end: ([\d.]+)", stderr)]
-        for i, fs in enumerate(freeze_starts):
-            fe = freeze_ends[i] if i < len(freeze_ends) else duration
-            scan["freeze_segments"].append([round(fs, 2), round(fe, 2)])
-            scan["issues"].append(
-                f"Frozen frame {fs:.1f}s-{fe:.1f}s ({fe - fs:.1f}s of "
-                f"bit-identical frames) — verify this hold is intentional"
-            )
-
-        if has_audio:
-            sil_starts = [float(x) for x in _re.findall(r"silence_start: (-?[\d.]+)", stderr)]
-            sil_ends = [float(x) for x in _re.findall(r"silence_end: (-?[\d.]+)", stderr)]
-            for i, ss in enumerate(sil_starts):
-                se = sil_ends[i] if i < len(sil_ends) else duration
-                scan["silence_gaps"].append([round(ss, 2), round(se, 2)])
-                if audio_expected and ss > 0.5 and se < duration - 0.5:
-                    scan["issues"].append(
-                        f"Dead air {ss:.1f}s-{se:.1f}s ({se - ss:.1f}s of "
-                        f"silence mid-program)"
-                    )
-
-            # ebur128 logs a per-frame "I: … LUFS" during measurement (the
-            # first ones read -70 while the integrator warms up) and the
-            # final summary last — take the LAST match.
-            lufs_matches = _re.findall(r"I:\s*(-?[\d.]+) LUFS", stderr)
-            if lufs_matches:
-                lufs = float(lufs_matches[-1])
-                scan["integrated_lufs"] = lufs
-                if audio_expected and abs(lufs - (-14.0)) > 2.0:
-                    scan["issues"].append(
-                        f"Integrated loudness {lufs:.1f} LUFS is off the -14 "
-                        f"LUFS delivery target — run loudness normalization"
-                    )
-
-        return scan
+        """See compose_review._perceptual_scan."""
+        from tools.video.compose_review import _perceptual_scan
+        return _perceptual_scan(
+            output_path, duration, audio_expected=audio_expected, has_audio=has_audio
+        )
 
     @staticmethod
     def _parse_probe_fps(fps_str: str) -> float:
-        """Parse ffprobe fps string like '30/1' or '24000/1001'."""
-        try:
-            if "/" in fps_str:
-                num, den = fps_str.split("/")
-                return round(int(num) / max(int(den), 1), 2)
-            return float(fps_str)
-        except (ValueError, ZeroDivisionError):
-            return 0.0
+        """See compose_review._parse_probe_fps."""
+        from tools.video.compose_review import _parse_probe_fps
+        return _parse_probe_fps(fps_str)
 
     def _burn_subtitles(self, inputs: dict[str, Any]) -> ToolResult:
         """Burn subtitle file into video."""
@@ -3256,104 +2449,21 @@ class VideoCompose(BaseTool):
         edit_decisions: dict | None,
         playbook: dict | None,
     ) -> dict:
-        """Resolve subtitle style with layered priority.
-
-        Priority: explicit_style > edit_decisions.subtitles.style > playbook > defaults.
-        This prevents every video from looking identical (Arial bold white).
-        """
-        # Start with minimal fallback defaults
-        resolved = {
-            "font": "Inter",
-            "font_size": 28,
-            "bold": True,
-            "outline_width": 2,
-            "shadow": 0,
-            "margin_v": 40,
-            "alignment": 2,
-        }
-
-        # Layer 1: Playbook-derived style
-        if playbook:
-            typo = playbook.get("typography", {})
-            colors = playbook.get("visual_language", {}).get("color_palette", {})
-            # Schema key is `font` (see playbook.schema.json font_spec) — the
-            # old `family` lookup never matched, so the subtitle font
-            # silently stayed at the default for every playbook.
-            body_font = typo.get("body", {}).get("font") or typo.get("body", {}).get("family")
-            if body_font:
-                resolved["font"] = body_font
-            if colors.get("text"):
-                resolved["primary_color"] = colors["text"]
-            if colors.get("background"):
-                resolved["outline_color"] = colors["background"]
-                # Semi-transparent background for readability
-                bg = colors["background"]
-                resolved["back_color"] = bg
-
-        # Layer 2: edit_decisions subtitle style
-        if edit_decisions:
-            ed_style = edit_decisions.get("subtitles", {}).get("style", {})
-            for k, v in ed_style.items():
-                if v is not None:
-                    resolved[k] = v
-
-        # Layer 3: Explicit override (highest priority)
-        if explicit_style:
-            for k, v in explicit_style.items():
-                if v is not None:
-                    resolved[k] = v
-
-        return resolved
+        """See compose_theme._resolve_subtitle_style."""
+        from tools.video.compose_theme import _resolve_subtitle_style
+        return _resolve_subtitle_style(explicit_style, edit_decisions, playbook)
 
     @staticmethod
     def _hex_to_ass_color(color: str, alpha: int = 0) -> str:
-        """Convert a #RRGGBB(AA) hex color to ASS &HAABBGGRR format.
-
-        libass force_style color values MUST be in &HAABBGGRR (alpha 00 =
-        opaque, FF = transparent; channels reversed vs CSS). Raw hex was
-        previously passed straight through, so playbook-derived subtitle
-        colors were misparsed or ignored on every burn — the styles never
-        rendered as designed (audit 2026-07-16, Wave 1 ④). Values already in
-        &H… form pass through; non-hex values (font names would never reach
-        here, but rgba() strings could) fall back unchanged rather than
-        producing garbage.
-        """
-        value = (color or "").strip()
-        if value.upper().startswith("&H"):
-            return value
-        m = re.fullmatch(r"#?([0-9A-Fa-f]{6})([0-9A-Fa-f]{2})?", value)
-        if not m:
-            return value
-        rgb = m.group(1)
-        if m.group(2) is not None:
-            # CSS trailing alpha: FF = opaque → ASS: 00 = opaque.
-            alpha = 255 - int(m.group(2), 16)
-        r, g, b = rgb[0:2], rgb[2:4], rgb[4:6]
-        return f"&H{alpha:02X}{b}{g}{r}".upper()
+        """See compose_theme._hex_to_ass_color."""
+        from tools.video.compose_theme import _hex_to_ass_color
+        return _hex_to_ass_color(color, alpha)
 
     @staticmethod
     def _build_subtitle_style(style: dict) -> str:
-        """Build ASS force_style string from style dict."""
-        parts = []
-        parts.append(f"FontName={style.get('font', 'Inter')}")
-        parts.append(f"FontSize={style.get('font_size', 28)}")
-        parts.append(f"Bold={1 if style.get('bold', True) else 0}")
-        if style.get("primary_color"):
-            parts.append(f"PrimaryColour={VideoCompose._hex_to_ass_color(style['primary_color'])}")
-        if style.get("outline_color"):
-            parts.append(f"OutlineColour={VideoCompose._hex_to_ass_color(style['outline_color'])}")
-        if style.get("back_color"):
-            # Semi-transparent by default: BackColour is the box fill under
-            # BorderStyle=3 (and the shadow color otherwise) — a fully
-            # opaque box reads heavy over video.
-            parts.append(f"BackColour={VideoCompose._hex_to_ass_color(style['back_color'], alpha=0x60)}")
-        border_style = style.get("border_style", 1)
-        parts.append(f"BorderStyle={border_style}")
-        parts.append(f"Outline={style.get('outline_width', 2)}")
-        parts.append(f"Shadow={style.get('shadow', 0)}")
-        parts.append(f"MarginV={style.get('margin_v', 40)}")
-        parts.append(f"Alignment={style.get('alignment', 2)}")
-        return ",".join(parts)
+        """See compose_theme._build_subtitle_style."""
+        from tools.video.compose_theme import _build_subtitle_style
+        return _build_subtitle_style(style)
 
     @staticmethod
     def _build_atempo(factor: float) -> str:
