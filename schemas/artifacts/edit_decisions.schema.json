@@ -112,57 +112,115 @@
     },
     "overlays": {
       "type": "array",
+      "description": "Overlays carry TWO legitimate shapes. Asset overlay: asset_id + start_seconds/end_seconds + position — an image/video composited on top (both runtimes). Component overlay: type + in_seconds/out_seconds — a Remotion-only scene component (section_title/stat_reveal/hero_title/provider_chip). The schema described only the first, so a component overlay failed validation while a Remotion render of an asset overlay silently produced nothing (audit 2026-07-16, B4).",
       "items": {
-        "type": "object",
-        "required": [
-          "asset_id",
-          "start_seconds",
-          "end_seconds",
-          "position"
-        ],
-        "properties": {
-          "asset_id": {
-            "type": "string"
-          },
-          "start_seconds": {
-            "type": "number",
-            "minimum": 0
-          },
-          "end_seconds": {
-            "type": "number",
-            "minimum": 0
-          },
-          "position": {
+        "oneOf": [
+          {
             "type": "object",
+            "required": [
+              "asset_id",
+              "start_seconds",
+              "end_seconds",
+              "position"
+            ],
             "properties": {
-              "x": {
-                "type": "number"
+              "asset_id": {
+                "type": "string"
               },
-              "y": {
-                "type": "number"
+              "start_seconds": {
+                "type": "number",
+                "minimum": 0
               },
-              "width": {
-                "type": "number"
+              "end_seconds": {
+                "type": "number",
+                "minimum": 0
               },
-              "height": {
-                "type": "number"
+              "position": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ]
+              },
+              "animation": {
+                "type": "string"
+              },
+              "opacity": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
               }
             },
+            "additionalProperties": true,
+            "description": "Asset overlay — an image/video composited at a position. Implemented by the ffmpeg `overlay` operation and by Explainer's AssetOverlayRenderer."
+          },
+          {
+            "type": "object",
+            "description": "Component overlay — a Remotion scene component (see remotion-composer/SCENE_TYPES.md).",
             "required": [
-              "x",
-              "y"
-            ]
-          },
-          "animation": {
-            "type": "string"
-          },
-          "opacity": {
-            "type": "number",
-            "minimum": 0,
-            "maximum": 1
+              "type",
+              "in_seconds",
+              "out_seconds"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "section_title",
+                  "stat_reveal",
+                  "hero_title",
+                  "provider_chip"
+                ]
+              },
+              "in_seconds": {
+                "type": "number",
+                "minimum": 0
+              },
+              "out_seconds": {
+                "type": "number",
+                "minimum": 0
+              },
+              "text": {
+                "type": "string"
+              },
+              "subtitle": {
+                "type": "string"
+              },
+              "accentColor": {
+                "type": "string"
+              },
+              "position": {
+                "type": "string"
+              },
+              "providers": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "cycleSeconds": {
+                "type": "number"
+              },
+              "label": {
+                "type": "string"
+              }
+            }
           }
-        },
-        "additionalProperties": true
+        ]
       }
     },
     "audio": {

@@ -215,10 +215,18 @@ class VideoCompose(BaseTool):
         cpu_cores=4, ram_mb=2048, vram_mb=0, disk_mb=5000, network_required=False
     )
 
-    # Remotion scene types that trigger React-based rendering
+    # Remotion scene types that trigger React-based rendering — the ONE list.
+    # Mirrors remotion-composer/SCENE_TYPES.md's table (and Explainer's
+    # SceneRenderer branches), which is the authority. This used to be two
+    # hand-maintained lists that had drifted apart AND away from reality:
+    # both advertised "progress" and "chart", which no renderer has ever
+    # implemented, while omitting progress_bar, hero_title, terminal_scene,
+    # anime_scene and screenshot_scene, which it does (audit 2026-07-15, B5).
+    # get_info() exposes this to agents, so a stale entry is a lie they act on.
     _REMOTION_COMPONENTS = [
-        "text_card", "stat_card", "callout", "comparison",
-        "progress", "chart", "bar_chart", "line_chart", "pie_chart", "kpi_grid",
+        "text_card", "stat_card", "callout", "comparison", "hero_title",
+        "bar_chart", "line_chart", "pie_chart", "kpi_grid", "progress_bar",
+        "anime_scene", "terminal_scene", "screenshot_scene",
     ]
 
     best_for = [
@@ -792,9 +800,8 @@ class VideoCompose(BaseTool):
                 except OSError:
                     pass
 
-    _REMOTION_SCENE_TYPES = {
-        "text_card", "stat_card", "callout", "comparison", "progress", "chart",
-    }
+    # Same set, for the _needs_remotion fast path — derived, never re-typed.
+    _REMOTION_SCENE_TYPES = frozenset(_REMOTION_COMPONENTS)
 
     # Maps renderer_family (set at proposal stage) to Remotion composition ID.
     # Each family MUST map to a distinct composition — collapsing defeats visual grammar.
@@ -1581,6 +1588,31 @@ class VideoCompose(BaseTool):
             if source_id in asset_lookup:
                 resolved_cut["source"] = asset_lookup[source_id]["path"]
             resolved_cuts.append(resolved_cut)
+
+        # Same for ASSET overlays. Cuts got this treatment from day one but
+        # overlays never did, so an asset overlay reached the renderer with an
+        # unresolved asset_id and simply didn't appear (audit 2026-07-16, B4).
+        # `source` is what both renderers read; component overlays (keyed by
+        # `type`) pass through untouched.
+        resolved_overlays = []
+        for overlay in edit_decisions.get("overlays") or []:
+            resolved_overlay = dict(overlay)
+            asset_id = overlay.get("asset_id")
+            if asset_id:
+                asset = asset_lookup.get(asset_id)
+                if asset is None and ":" in asset_id:
+                    # Real artifacts namespace these ("asset_manifest:hero_card").
+                    asset = asset_lookup.get(asset_id.split(":", 1)[1])
+                if asset is not None:
+                    resolved_overlay["source"] = asset["path"]
+                elif not overlay.get("source"):
+                    logging.getLogger("video_compose").warning(
+                        "Overlay asset_id %r is not in the asset_manifest — "
+                        "this overlay will not render.", asset_id,
+                    )
+            resolved_overlays.append(resolved_overlay)
+        if resolved_overlays:
+            edit_decisions = {**edit_decisions, "overlays": resolved_overlays}
 
         # --- Pre-compose validation gate ---
         scene_plan = inputs.get("scene_plan")
@@ -2743,6 +2775,14 @@ class VideoCompose(BaseTool):
                 cut["images"] = [
                     stage(i) if isinstance(i, str) else i for i in cut["images"]
                 ]
+        # Asset overlays are assets too — this list handled cuts, scenes and
+        # audio but not overlays, so a resolved overlay path reached the
+        # browser as a bare file:// URL and failed to decode. Same
+        # "overlays are second-class" pattern as B4 itself.
+        for overlay in props.get("overlays", []) or []:
+            for key in ("source", "src"):
+                if isinstance(overlay.get(key), str):
+                    overlay[key] = stage(overlay[key])
         for scene in props.get("scenes", []) or []:
             for key in ("src", "videoSrc", "backgroundSrc", "imageSrc"):
                 if isinstance(scene.get(key), str):

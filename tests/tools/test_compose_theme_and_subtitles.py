@@ -134,3 +134,37 @@ class TestCaptionHighlightContrast:
             VideoCompose._pick_caption_highlight(["#111111", "#FFB347"], "#0F172A", False)
             == "#FFB347"
         )
+
+
+class TestSceneTypeCatalogMatchesReality:
+    """video_compose advertises scene types to agents via get_info().
+
+    Two hand-maintained lists had drifted apart AND away from the renderer:
+    both listed "progress" and "chart" (never implemented by anything) while
+    omitting progress_bar/hero_title/terminal_scene/anime_scene/
+    screenshot_scene (which are). Agents read get_info() and act on it, so a
+    stale entry is a lie. SCENE_TYPES.md is the authority.
+    """
+
+    @staticmethod
+    def _documented_scene_types() -> set[str]:
+        import re
+        doc = (PROJECT_ROOT / "remotion-composer" / "SCENE_TYPES.md").read_text()
+        # Overlay-only types are documented in the same file but are not
+        # cut.type values — they belong to edit_decisions.overlays.
+        overlay_only = {"section_title", "stat_reveal", "provider_chip"}
+        found = set(re.findall(r"^\|\s*\*{0,2}`([a-z_]+)`", doc, re.M))
+        return {t for t in found if t not in overlay_only and t != "type"}
+
+    def test_advertises_no_nonexistent_scene_type(self):
+        advertised = set(VideoCompose._REMOTION_COMPONENTS)
+        ghosts = advertised - self._documented_scene_types()
+        assert not ghosts, f"advertised but not implemented: {sorted(ghosts)}"
+
+    def test_advertises_every_real_scene_type(self):
+        advertised = set(VideoCompose._REMOTION_COMPONENTS)
+        missing = self._documented_scene_types() - advertised
+        assert not missing, f"implemented but not advertised: {sorted(missing)}"
+
+    def test_the_two_lists_cannot_drift(self):
+        assert set(VideoCompose._REMOTION_COMPONENTS) == set(VideoCompose._REMOTION_SCENE_TYPES)

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import subprocess
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -582,36 +583,73 @@ def _clamp_timeout(timeout: Any, remaining: float) -> Any:
 
 @contextmanager
 def _requests_deadline(deadline: float):
-    """Clamp adapter requests calls to the direct-search deadline.
+    """Clamp THIS THREAD's adapter requests calls to the direct-search deadline.
 
     Stock-source adapters are intentionally simple and call `requests.get`
-    directly. Keeping the deadline wrapper here avoids widening every adapter
-    method signature while still preventing streaming downloads from running
-    past the tool-level budget.
+    directly; this keeps the deadline wrapper here rather than widening every
+    adapter method signature.
+
+    The deadline lives in a thread-local and the wrapper is installed ONCE,
+    permanently. The previous version swapped `requests.get` for the duration
+    of the search and restored it in `finally` — but tools run in parallel
+    threads (see base_tool.py's thread-local _EXECUTE_DEPTH, which exists for
+    exactly that reason), so while the patch was live EVERY other concurrently
+    running tool's requests.get silently had its timeout clamped to THIS
+    search's remaining budget and could raise _DeadlineExceeded — an exception
+    type foreign to that tool. Two overlapping searches could also restore a
+    stale reference and leave the wrapper installed forever.
+
+    Installed-once + thread-local fixes both: other threads have no deadline
+    set, so the wrapper passes straight through, and there is no restore to
+    race on. (The clean-architecture fix is threading a session through the
+    StockSource protocol — 16 adapters — which is a bigger change than this
+    bug warrants.)
     """
-    import requests
-
-    original_get = requests.get
-
-    def get_with_deadline(*args, **kwargs):
-        remaining = remaining_seconds(deadline)
-        kwargs["timeout"] = _clamp_timeout(kwargs.get("timeout"), remaining)
-        response = original_get(*args, **kwargs)
-        original_iter_content = getattr(response, "iter_content", None)
-        if callable(original_iter_content):
-            def iter_content_with_deadline(*iter_args, **iter_kwargs):
-                for chunk in original_iter_content(*iter_args, **iter_kwargs):
-                    remaining_seconds(deadline)
-                    yield chunk
-
-            response.iter_content = iter_content_with_deadline
-        return response
-
-    requests.get = get_with_deadline
+    _install_deadline_get()
+    previous = getattr(_deadline_state, "deadline", None)
+    _deadline_state.deadline = deadline
     try:
         yield
     finally:
-        requests.get = original_get
+        _deadline_state.deadline = previous
+
+
+# Per-thread deadline for the wrapper below. Absent → wrapper is a no-op.
+_deadline_state = threading.local()
+_install_lock = threading.Lock()
+_deadline_get_installed = False
+
+
+def _install_deadline_get() -> None:
+    """Install the deadline-aware requests.get wrapper exactly once."""
+    global _deadline_get_installed
+    import requests
+
+    with _install_lock:
+        if _deadline_get_installed:
+            return
+        original_get = requests.get
+
+        def get_with_deadline(*args, **kwargs):
+            deadline = getattr(_deadline_state, "deadline", None)
+            if deadline is None:
+                # No deadline on this thread — behave exactly like requests.get.
+                return original_get(*args, **kwargs)
+            remaining = remaining_seconds(deadline)
+            kwargs["timeout"] = _clamp_timeout(kwargs.get("timeout"), remaining)
+            response = original_get(*args, **kwargs)
+            original_iter_content = getattr(response, "iter_content", None)
+            if callable(original_iter_content):
+                def iter_content_with_deadline(*iter_args, **iter_kwargs):
+                    for chunk in original_iter_content(*iter_args, **iter_kwargs):
+                        remaining_seconds(deadline)
+                        yield chunk
+
+                response.iter_content = iter_content_with_deadline
+            return response
+
+        requests.get = get_with_deadline
+        _deadline_get_installed = True
 
 
 def _extract_mid_thumbnail(

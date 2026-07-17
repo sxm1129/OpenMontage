@@ -42,7 +42,7 @@ import { ProviderChip } from "./components/ProviderChip";
 import type { ParticleType } from "./components/ParticleOverlay";
 import { resolveTheme, type ThemeConfig, DEFAULT_THEME, ThemeContext } from "./lib/theme";
 import { withCjkFallback, themeFont } from "./fonts";
-import { DUR_TRANSITION_S, EASE_IN_OUT, SPRING_ENTER } from "./lib/motion";
+import { DUR_ENTER_S, DUR_TRANSITION_S, EASE_IN_OUT, EASE_OUT, SPRING_ENTER } from "./lib/motion";
 import { validateCuts } from "./lib/validateCut";
 
 // Load Space Grotesk font for cinematic typography
@@ -304,7 +304,23 @@ interface Cut {
   cursorStartAt?: [number, number];
 }
 
-interface Overlay {
+/** `edit_decisions.overlays` carries TWO shapes, and both are legitimate:
+ *
+ *  1. COMPONENT overlay — a Remotion-only concept: `type` names a component
+ *     (section_title/stat_reveal/hero_title/provider_chip) timed with
+ *     in_seconds/out_seconds.
+ *  2. ASSET overlay — an image/video composited at a normalized position,
+ *     timed with start_seconds/end_seconds. This is what
+ *     edit_decisions.schema.json has always described, what the ffmpeg
+ *     `overlay` operation implements, and what all 7 real projects author.
+ *
+ * Until now this composition only understood #1, so a schema-conformant
+ * asset overlay hit no branch and rendered as null — silently invisible,
+ * with `Sequence from = Math.round(undefined * fps) = NaN` (audit
+ * 2026-07-16, B4). Both shapes now render, and anything matching neither
+ * warns instead of vanishing.
+ */
+interface ComponentOverlay {
   type: "section_title" | "stat_reveal" | "hero_title" | "provider_chip";
   in_seconds: number;
   out_seconds: number;
@@ -316,6 +332,42 @@ interface Overlay {
   providers?: string[];
   cycleSeconds?: number;
   label?: string;
+}
+
+interface AssetOverlay {
+  /** Resolved by video_compose._render from asset_id; a path or URL. */
+  source?: string;
+  asset_id?: string;
+  start_seconds: number;
+  end_seconds: number;
+  /** Normalized (0-1) or percent (0-100) — both are in real artifacts. */
+  position?: { x: number; y: number; width?: number; height?: number };
+  opacity?: number;
+  animation?: string;
+}
+
+type Overlay = ComponentOverlay | AssetOverlay;
+
+function isComponentOverlay(o: Overlay): o is ComponentOverlay {
+  return typeof (o as ComponentOverlay).type === "string";
+}
+
+function isAssetOverlay(o: Overlay): o is AssetOverlay {
+  const a = o as AssetOverlay;
+  return typeof (a.source ?? a.asset_id) === "string";
+}
+
+/** Overlay timings come in both vocabularies; normalize to seconds. */
+function overlayWindow(o: Overlay): { from: number; to: number } | null {
+  const c = o as ComponentOverlay;
+  const a = o as AssetOverlay;
+  const from = typeof c.in_seconds === "number" ? c.in_seconds : a.start_seconds;
+  const to = typeof c.out_seconds === "number" ? c.out_seconds : a.end_seconds;
+  // A NaN window silently produced `Sequence from={NaN}` before.
+  if (typeof from !== "number" || typeof to !== "number" || !isFinite(from) || !isFinite(to)) {
+    return null;
+  }
+  return { from, to };
 }
 
 interface AudioLayer {
@@ -819,7 +871,68 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
 // Overlay renderer
 // ---------------------------------------------------------------------------
 
+/** An image/video composited at a normalized position — the shape
+ *  edit_decisions.schema.json describes and every real project authors. */
+const AssetOverlayRenderer: React.FC<{ overlay: AssetOverlay }> = ({ overlay }) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const src = overlay.source ?? overlay.asset_id ?? "";
+  const pos = overlay.position ?? { x: 0.5, y: 0.5 };
+  // Real artifacts carry BOTH conventions: normalized 0-1 (ThinkVision) and
+  // percent 0-100 (e2e-v3-咖啡机). Anything >1 can only be percent.
+  const scale = (v: number | undefined, dflt: number) => {
+    if (typeof v !== "number") return dflt;
+    return v > 1 ? v / 100 : v;
+  };
+  const x = scale(pos.x, 0.5), y = scale(pos.y, 0.5);
+  const w = scale(pos.width, 0.4), h = scale(pos.height, undefined as unknown as number);
+
+  // Gentle fade so an overlay never pops in/out (matches the house motion).
+  const fade = interpolate(
+    frame,
+    [0, Math.round(DUR_ENTER_S * fps)],
+    [0, overlay.opacity ?? 1],
+    { easing: EASE_OUT, extrapolateLeft: "clamp", extrapolateRight: "clamp" }
+  );
+  const isVid = isVideo(src);
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: "none" }}>
+      <div
+        style={{
+          position: "absolute",
+          left: `${x * 100}%`,
+          top: `${y * 100}%`,
+          width: `${w * 100}%`,
+          ...(h ? { height: `${h * 100}%` } : {}),
+          transform: "translate(-50%, -50%)",
+          opacity: fade,
+        }}
+      >
+        {isVid ? (
+          <OffthreadVideo src={resolveAsset(src)} style={{ width: "100%", height: "100%", objectFit: "contain" }} muted />
+        ) : (
+          <Img src={resolveAsset(src)} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+        )}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
 const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
+  if (isAssetOverlay(overlay)) {
+    return <AssetOverlayRenderer overlay={overlay} />;
+  }
+  if (!isComponentOverlay(overlay)) {
+    // Matches neither shape — say so instead of vanishing.
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[openmontage] overlay matches neither shape (needs \`type\` for a component ` +
+        `overlay, or \`source\`/\`asset_id\` for an asset overlay) — NOT rendered: ` +
+        JSON.stringify(overlay).slice(0, 160)
+    );
+    return null;
+  }
   // text-bearing overlay types render nothing when text is missing — a
   // malformed overlay must not reach a component whose `title`/`stat` prop
   // is required (it rendered "undefined" on screen and failed typecheck).
@@ -857,6 +970,13 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
       />
     );
   }
+  // A known component type whose required field is missing (e.g. a
+  // section_title with no text) — same silent-downgrade class as cuts.
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[openmontage] overlay type "${overlay.type}" is missing its required ` +
+      `field — NOT rendered. See SCENE_TYPES.md.`
+  );
   return null;
 };
 
@@ -1009,10 +1129,20 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
 
       {/* Layer 2: Overlays (section titles, stat reveals, hero titles) */}
       {overlays?.map((overlay, i) => {
-        const from = Math.round(overlay.in_seconds * fps);
-        const duration = Math.round(
-          (overlay.out_seconds - overlay.in_seconds) * fps
-        );
+        // Both overlay vocabularies (in_seconds/out_seconds and
+        // start_seconds/end_seconds) resolve here; an unusable window
+        // returns null rather than producing Sequence from={NaN}.
+        const win = overlayWindow(overlay);
+        if (!win) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[openmontage] overlay ${i} has no usable time window ` +
+              `(needs in_seconds/out_seconds or start_seconds/end_seconds) — NOT rendered.`
+          );
+          return null;
+        }
+        const from = Math.round(win.from * fps);
+        const duration = Math.round((win.to - win.from) * fps);
 
         return (
           <Sequence key={`overlay-${i}`} from={from} durationInFrames={duration}>
