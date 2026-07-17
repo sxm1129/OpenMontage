@@ -1668,6 +1668,8 @@ class VideoCompose(BaseTool):
             hf_inputs["fps"] = inputs["fps"]
         if "strict" in inputs:
             hf_inputs["strict"] = inputs["strict"]
+        if "best_effort" in inputs:
+            hf_inputs["best_effort"] = inputs["best_effort"]
         if "skip_contrast" in inputs:
             hf_inputs["skip_contrast"] = inputs["skip_contrast"]
 

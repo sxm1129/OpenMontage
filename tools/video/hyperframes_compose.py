@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from lib.gsap_runtime import stage_gsap_in_workspace
 from tools.base_tool import (
     BaseTool,
     Determinism,
@@ -183,8 +184,20 @@ class HyperFramesCompose(BaseTool):
                 "type": "boolean",
                 "default": False,
                 "description": (
-                    "If true, fail the render on any lint error. Matches "
-                    "`hyperframes render --strict`."
+                    "If true, fail the render when the lint step reports any "
+                    "error. Non-strict logs lint issues and continues."
+                ),
+            },
+            "best_effort": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "If true, let the render succeed despite capture-correctness "
+                    "warnings — the CLI's own default. OpenMontage inverts that "
+                    "default: a warning such as `sub_timeline_script_failure` "
+                    "means the MP4 was produced without its animation, and "
+                    "shipping that while reporting success is exactly the silent "
+                    "downgrade AGENT_GUIDE.md forbids."
                 ),
             },
             "skip_contrast": {
@@ -516,6 +529,10 @@ class HyperFramesCompose(BaseTool):
         if design_md:
             (workspace / "DESIGN.md").write_text(design_md, encoding="utf-8")
 
+        # Stage the GSAP runtime locally — compositions must never fetch it
+        # over the network at validate/render time.
+        gsap_src = stage_gsap_in_workspace(workspace)
+
         # Write index.html — the main composition.
         total_duration = self._compute_total_duration(resolved_cuts)
         html = self._generate_index_html(
@@ -525,6 +542,7 @@ class HyperFramesCompose(BaseTool):
             height=height,
             total_duration=total_duration,
             css_vars=css_vars,
+            gsap_src=gsap_src,
             title=edit_decisions.get("metadata", {}).get("title")
             or f"OpenMontage {edit_decisions.get('renderer_family', 'composition')}",
         )
@@ -564,7 +582,9 @@ class HyperFramesCompose(BaseTool):
         return ToolResult(
             success=ok,
             data=data,
-            error=None if ok else f"hyperframes lint exit {proc.returncode}",
+            error=None
+            if ok
+            else f"hyperframes lint exit {proc.returncode}{self._diagnostics(data)}",
         )
 
     def _validate(self, inputs: dict[str, Any]) -> ToolResult:
@@ -589,7 +609,9 @@ class HyperFramesCompose(BaseTool):
         return ToolResult(
             success=ok,
             data=data,
-            error=None if ok else f"hyperframes validate exit {proc.returncode}",
+            error=None
+            if ok
+            else f"hyperframes validate exit {proc.returncode}{self._diagnostics(data)}",
         )
 
     def _add_block(self, inputs: dict[str, Any]) -> ToolResult:
@@ -635,7 +657,9 @@ class HyperFramesCompose(BaseTool):
         return ToolResult(
             success=ok,
             data=data,
-            error=None if ok else f"hyperframes add {block} exit {proc.returncode}",
+            error=None
+            if ok
+            else f"hyperframes add {block} exit {proc.returncode}{self._diagnostics(data)}",
         )
 
     def _render(self, inputs: dict[str, Any]) -> ToolResult:
@@ -710,6 +734,11 @@ class HyperFramesCompose(BaseTool):
             "--fps", str(fps),
             "--quality", quality,
         ]
+        # The CLI defaults to --best-effort, which exits 0 on capture-correctness
+        # warnings and writes an MP4 anyway (e.g. an un-animated video when a
+        # timeline script fails to load). Fail closed unless asked not to.
+        if not inputs.get("best_effort", False):
+            args.append("--no-best-effort")
         proc = self._run_hf(args, cwd=workspace, timeout=1800, check=False)
         steps["render"] = {
             "exit_code": proc.returncode,
@@ -719,7 +748,10 @@ class HyperFramesCompose(BaseTool):
         if proc.returncode != 0:
             return ToolResult(
                 success=False,
-                error=f"hyperframes render exit {proc.returncode}",
+                error=(
+                    f"hyperframes render exit {proc.returncode}"
+                    f"{self._diagnostics(steps['render'])}"
+                ),
                 data={"steps": steps},
             )
 
@@ -940,6 +972,7 @@ class HyperFramesCompose(BaseTool):
         height: int,
         total_duration: float,
         css_vars: dict[str, str],
+        gsap_src: str,
         title: str,
     ) -> str:
         """Emit a HyperFrames-contract-compliant index.html.
@@ -1012,7 +1045,7 @@ class HyperFramesCompose(BaseTool):
     .clip.text-card h1 {{ font-family: var(--font-heading); font-weight: 700; font-size: 96px; line-height: 1.1; margin: 0; color: var(--color-fg); }}
     .clip.text-card .subtitle {{ font-size: 36px; margin-top: 24px; color: var(--color-accent); }}
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <script src="{self._escape_attr(gsap_src)}"></script>
 </head>
 <body>
   <div data-composition-id="root" data-start="0" data-duration="{self._f(total_duration)}" data-width="{width}" data-height="{height}">
@@ -1153,6 +1186,40 @@ class HyperFramesCompose(BaseTool):
                 stdout=e.stdout or "",
                 stderr=(e.stderr or "") + f"\n[timeout after {timeout}s]",
             )
+
+    @staticmethod
+    def _diagnostics(data: dict[str, Any], limit: int = 5) -> str:
+        """Summarize why a CLI step failed, for the ToolResult error string.
+
+        The full report and stderr already ride along in `data`, but callers
+        overwhelmingly surface only `.error` — so a broken composition read as
+        a bare `exit 1` with no hint of the cause. Pull the CLI's own error
+        text up into the message.
+        """
+        lines: list[str] = []
+        report = data.get("report")
+        if isinstance(report, dict):
+            for err in (report.get("errors") or [])[:limit]:
+                if isinstance(err, dict):
+                    url = err.get("url")
+                    text = err.get("text") or err.get("message") or str(err)
+                    lines.append(f"{text}{f' [{url}]' if url else ''}")
+                else:
+                    lines.append(str(err))
+            for finding in (report.get("findings") or []):
+                if isinstance(finding, dict) and finding.get("severity") == "error":
+                    lines.append(f"[{finding.get('code')}] {finding.get('message')}")
+                if len(lines) >= limit:
+                    break
+
+        if not lines:
+            tail = (data.get("stderr_tail") or "").strip()
+            if tail:
+                lines = tail.splitlines()[-limit:]
+
+        if not lines:
+            return ""
+        return " — " + "; ".join(line.strip() for line in lines[:limit] if line.strip())
 
     @staticmethod
     def _parse_json_output(stdout: str) -> Optional[Any]:
