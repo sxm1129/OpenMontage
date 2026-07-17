@@ -638,6 +638,13 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
   const rawBg = (cut.backgroundImage || cut.backgroundVideo) ? "transparent" : (cut.backgroundColor || theme.surfaceColor);
   const bgColor = (rawBg === theme.backgroundColor || rawBg === "#0F172A" || rawBg === "#0f172a") ? "transparent" : rawBg;
   const textColor = cut.color || theme.textColor;
+  // Charts need the theme's TEXT color and a grid tuned to the surface —
+  // they used to receive neither and fell back to their own light-theme
+  // defaults (#1F2937 text, #E5E7EB grid), so on every dark theme the
+  // title, axis labels and value labels rendered invisible (found by E2E
+  // render inspection, 2026-07-17).
+  const gridColor = `${theme.mutedTextColor}59`;
+  const chartFont = themeFont(theme.bodyFont, "Inter, system-ui, sans-serif");
   const accent = cut.accentColor || theme.accentColor;
 
   // Explicit component types — use theme-derived defaults for colors
@@ -704,6 +711,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         data={cut.chartData} title={cut.title} colors={cut.chartColors || theme.chartColors}
         animationStyle={(cut.chartAnimation as any) || "grow-up"}
         showGrid={cut.showGrid} showValues={cut.showValues} backgroundColor={bgColor}
+        textColor={textColor} gridColor={gridColor} fontFamily={chartFont}
       />
     );
   }
@@ -714,6 +722,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         animationStyle={(cut.chartAnimation as any) || "draw"}
         showGrid={cut.showGrid} showMarkers={cut.showMarkers} showLegend={cut.showLegend}
         xLabel={cut.xLabel} yLabel={cut.yLabel} backgroundColor={bgColor}
+        textColor={textColor} gridColor={gridColor} fontFamily={chartFont}
       />
     );
   }
@@ -724,6 +733,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         animationStyle={(cut.chartAnimation as any) || "expand"}
         donut={cut.donut} centerLabel={cut.centerLabel} centerValue={cut.centerValue}
         showLegend={cut.showLegend} backgroundColor={bgColor}
+        textColor={textColor} fontFamily={chartFont}
       />
     );
   }
@@ -733,6 +743,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         metrics={cut.chartData} title={cut.title} columns={cut.columns}
         colors={cut.chartColors || theme.chartColors} animationStyle={(cut.chartAnimation as any) || "count-up"}
         backgroundColor={bgColor}
+        textColor={textColor} fontFamily={chartFont}
       />
     );
   }

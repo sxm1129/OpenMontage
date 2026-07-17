@@ -69,6 +69,12 @@ class VideoStitch(BaseTool):
         "-movflags", "+faststart",
     ]
 
+    # The output flags above only carry `colorspace` into an x264 encode —
+    # primaries/trc need to be set on the FRAMES (verified against ffmpeg
+    # 8.1). Appended to every filter graph that feeds an encoder; mirrors
+    # VideoCompose._SETPARAMS_BT709, where the full rationale lives.
+    _SETPARAMS_BT709 = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+
     input_schema = {
         "type": "object",
         "required": ["operation"],
@@ -486,7 +492,9 @@ class VideoStitch(BaseTool):
         cmd = [
             "ffmpeg", "-y",
             "-i", str(clip_path),
-            "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+            "-vf",
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,{self._SETPARAMS_BT709}",
             "-r", str(fps),
             "-c:v", video_codec, "-crf", str(crf), "-preset", preset,
             "-c:a", audio_codec, "-ar", "44100", "-ac", "2",
@@ -721,7 +729,8 @@ class VideoStitch(BaseTool):
                 "-i", clips[0],
                 "-i", clips[1],
                 "-filter_complex",
-                f"[0:v][1:v]xfade=transition=fade:duration={duration}:offset={self._get_xfade_offset(probes, 0, duration)}[v];"
+                f"[0:v][1:v]xfade=transition=fade:duration={duration}:offset={self._get_xfade_offset(probes, 0, duration)}[vx];"
+                f"[vx]{self._SETPARAMS_BT709}[v];"
                 f"[0:a][1:a]acrossfade=d={duration}[a]",
                 "-map", "[v]", "-map", "[a]",
                 *self._FINISH_ENCODE_FLAGS,
@@ -747,7 +756,8 @@ class VideoStitch(BaseTool):
                 "-i", clips[0],
                 "-i", clips[1],
                 "-filter_complex",
-                f"[0:v][1:v]xfade=transition=fadeblack:duration={duration}:offset={self._get_xfade_offset(probes, 0, duration)}[v];"
+                f"[0:v][1:v]xfade=transition=fadeblack:duration={duration}:offset={self._get_xfade_offset(probes, 0, duration)}[vx];"
+                f"[vx]{self._SETPARAMS_BT709}[v];"
                 f"[0:a][1:a]acrossfade=d={duration}[a]",
                 "-map", "[v]", "-map", "[a]",
                 *self._FINISH_ENCODE_FLAGS,
@@ -824,7 +834,7 @@ class VideoStitch(BaseTool):
                 v_out = f"[vfade{i}]"
                 a_out = f"[afade{i}]"
             else:
-                v_out = "[vout]"
+                v_out = "[vlast]"
                 a_out = "[aout]"
 
             video_filters.append(
@@ -837,6 +847,9 @@ class VideoStitch(BaseTool):
             # Cumulative offset advances by clip duration minus overlap
             cumulative_offset = offset
 
+        # Color tags must be set on the frames feeding the encoder — the
+        # output flags alone only carry `colorspace` (see _SETPARAMS_BT709).
+        video_filters.append(f"[vlast]{self._SETPARAMS_BT709}[vout]")
         filter_complex = ";".join(video_filters + audio_filters)
 
         cmd = ["ffmpeg", "-y"]

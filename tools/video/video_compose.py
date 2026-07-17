@@ -392,6 +392,17 @@ class VideoCompose(BaseTool):
         "-color_trc", "bt709",
     ]
 
+    # ...but the flags above are NOT sufficient on an ENCODE path. Verified
+    # against ffmpeg 8.1/libx264: as output options they only reach the SPS
+    # VUI for `colorspace` (matrix coefficients) — primaries and trc are
+    # dropped, producing a half-tagged stream (color_space=bt709,
+    # color_primaries=unknown, color_transfer=unknown) that still leaves
+    # players guessing 2 of the 3 values. Setting the properties on the
+    # FRAMES via setparams makes the encoder emit all three. Encoder-
+    # agnostic, unlike -x264-params. On a stream COPY the output flags do
+    # write all three (container-level metadata), so they stay for that path.
+    _SETPARAMS_BT709 = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+
     # +faststart moves the moov atom to the file head so web players start
     # progressive playback immediately. Pure mux-time flag — works with
     # -c copy too.
@@ -459,8 +470,15 @@ class VideoCompose(BaseTool):
                     codec = _p.codec
                 if "crf" not in inputs:
                     crf = _p.crf
-            except (ImportError, ValueError):
-                pass
+            except ImportError:
+                pass  # lib unavailable — proceed with defaults
+            except ValueError as e:
+                # A typo'd profile name must NOT silently render the default
+                # aspect ratio: asking for a 9:16 delivery and getting 16:9 is
+                # an invisible, catastrophic substitution (found by E2E render
+                # inspection, 2026-07-17 — 'douyin_vertical' silently produced
+                # 1920x1080). get_profile's error already lists valid names.
+                return ToolResult(success=False, error=str(e))
 
         # Resolve target resolution + fit mode. Priority: explicit `profile`
         # arg > edit_decisions.metadata.compose_target > default (landscape HD).
@@ -483,8 +501,15 @@ class VideoCompose(BaseTool):
                 from lib.media_profiles import get_profile
                 p = get_profile(profile_name)
                 resolution = f"{p.width}x{p.height}"
-            except (ImportError, ValueError):
-                pass
+            except ImportError:
+                pass  # lib unavailable — proceed with defaults
+            except ValueError as e:
+                # A typo'd profile name must NOT silently render the default
+                # aspect ratio: asking for a 9:16 delivery and getting 16:9 is
+                # an invisible, catastrophic substitution (found by E2E render
+                # inspection, 2026-07-17 — 'douyin_vertical' silently produced
+                # 1920x1080). get_profile's error already lists valid names.
+                return ToolResult(success=False, error=str(e))
         try:
             target_w, target_h = (int(v) for v in resolution.split("x"))
         except ValueError:
@@ -586,7 +611,7 @@ class VideoCompose(BaseTool):
                             f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease",
                             f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black",
                         ]
-                    vf_parts: list[str] = [*geom, "setsar=1", "fps=30"]
+                    vf_parts: list[str] = [*geom, "setsar=1", "fps=30", self._SETPARAMS_BT709]
                     af_parts: list[str] = []
                     if speed != 1.0:
                         vf_parts.append(f"setpts={1.0/speed}*PTS")
@@ -691,14 +716,23 @@ class VideoCompose(BaseTool):
                     from lib.media_profiles import get_profile
                     p = get_profile(profile_name)
                     profile_flags = ["-s", f"{p.width}x{p.height}", "-r", str(p.fps)]
-                except (ImportError, ValueError):
-                    pass
+                except ImportError:
+                    pass  # lib unavailable — proceed with defaults
+                except ValueError as e:
+                    # A typo'd profile name must NOT silently render the default
+                    # aspect ratio: asking for a 9:16 delivery and getting 16:9 is
+                    # an invisible, catastrophic substitution (found by E2E render
+                    # inspection, 2026-07-17 — 'douyin_vertical' silently produced
+                    # 1920x1080). get_profile's error already lists valid names.
+                    return ToolResult(success=False, error=str(e))
 
             needs_reencode = bool(vfilters) or bool(profile_flags)
 
             if needs_reencode:
-                if vfilters:
-                    cmd.extend(["-vf", ",".join(vfilters)])
+                # setparams keeps all three color tags on the re-encode (the
+                # output flags alone only carry `colorspace` — see
+                # _SETPARAMS_BT709).
+                cmd.extend(["-vf", ",".join([*vfilters, self._SETPARAMS_BT709])])
                 # This is the SECOND lossy generation (segments were already
                 # encoded at `crf`) — finish at least one notch finer so the
                 # subtitle-burn pass doesn't stack visible loss on top.
@@ -1115,6 +1149,45 @@ class VideoCompose(BaseTool):
         }
 
     @staticmethod
+    def _is_light_hex(color: str) -> bool:
+        """Rough perceptual lightness test for a #RRGGBB background."""
+        v = (color or "").lstrip("#")
+        if len(v) < 6:
+            return False
+        try:
+            r, g, b = (int(v[i:i + 2], 16) for i in (0, 2, 4))
+        except ValueError:
+            return False
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 140
+
+    @staticmethod
+    def _pick_caption_highlight(
+        candidates: list[str], scrim_hex: str, light_bg: bool
+    ) -> str:
+        """First candidate that clears WCAG large-text contrast on the scrim.
+
+        Uses styles.playbook_loader.validate_contrast — the playbook
+        intelligence layer's own validator, which until now had no production
+        caller at all (audit 2026-07-15, structural item 3). Captions are
+        large, bold text, so 3:1 (AA large) is the right floor. Falls back to
+        a guaranteed-legible neutral rather than shipping an invisible
+        highlight.
+        """
+        try:
+            from styles.playbook_loader import validate_contrast
+        except Exception:
+            return candidates[0] if candidates else "#22D3EE"
+        for c in candidates:
+            if not c:
+                continue
+            try:
+                if validate_contrast(c, scrim_hex)["large_text"]["AA"]:
+                    return c
+            except Exception:
+                continue
+        return "#0F172A" if light_bg else "#F8FAFC"
+
+    @staticmethod
     def _build_theme_from_playbook(
         playbook_name: str | None,
         composition_data: dict | None,
@@ -1187,12 +1260,25 @@ class VideoCompose(BaseTool):
                 "transitionDuration": 0.4,
             }
 
-            # Derive caption colors from the palette
-            theme["captionHighlightColor"] = primary
-            # Caption background: semi-transparent version of the bg color
+            # Caption background: semi-transparent scrim matching the theme.
+            light_bg = VideoCompose._is_light_hex(bg)
+            caption_bg_hex = "#FFFFFF" if light_bg else "#0F172A"
             theme["captionBackgroundColor"] = (
-                f"rgba(255, 255, 255, 0.85)" if bg.upper() in ("#FFFFFF", "#FAFAFA", "#F9FAFB")
-                else f"rgba(15, 23, 42, 0.75)"
+                "rgba(255, 255, 255, 0.85)" if light_bg else "rgba(15, 23, 42, 0.75)"
+            )
+            # The active-word highlight must POP against that scrim — that IS
+            # its whole job. It used to be hardcoded to `primary`, which for a
+            # dark-primary playbook meant an invisible highlight: anime-ghibli
+            # rendered #2D5016 forest green on the #0F172A scrim — 1.93:1,
+            # below even the 3:1 WCAG large-text floor, while the playbook's
+            # own accent (#FFB347) scores 10.02:1. Root.tsx's hand-authored
+            # THEMES already use accent for exactly this, so the bridge was
+            # contradicting the theme it exists to reproduce (found by E2E
+            # render inspection, 2026-07-17). Pick the first candidate that
+            # actually passes, via the contrast validator the playbook
+            # intelligence layer already ships.
+            theme["captionHighlightColor"] = VideoCompose._pick_caption_highlight(
+                [accent, primary], caption_bg_hex, light_bg
             )
 
             # Motion style from the playbook's pace. The schema puts pace
@@ -1903,8 +1989,15 @@ class VideoCompose(BaseTool):
                 from lib.media_profiles import get_profile
                 p = get_profile(profile_name)
                 cmd.extend(["--width", str(p.width), "--height", str(p.height)])
-            except (ImportError, ValueError):
-                pass
+            except ImportError:
+                pass  # lib unavailable — proceed with defaults
+            except ValueError as e:
+                # A typo'd profile name must NOT silently render the default
+                # aspect ratio: asking for a 9:16 delivery and getting 16:9 is
+                # an invisible, catastrophic substitution (found by E2E render
+                # inspection, 2026-07-17 — 'douyin_vertical' silently produced
+                # 1920x1080). get_profile's error already lists valid names.
+                return ToolResult(success=False, error=str(e))
 
         # Optional creator-facing render timeout. Remotion's `--timeout` (ms)
         # governs headless-browser setup and delayRender(); on slow machines or
@@ -2733,7 +2826,8 @@ class VideoCompose(BaseTool):
             )
         vf = (
             f"{pre},zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
-            f":d={frames}:s={target_w}x{target_h}:fps=30,setsar=1"
+            f":d={frames}:s={target_w}x{target_h}:fps=30,setsar=1,"
+            f"{self._SETPARAMS_BT709}"
         )
 
         cmd = [
@@ -2944,7 +3038,7 @@ class VideoCompose(BaseTool):
         cmd = [
             "ffmpeg", "-y",
             "-i", str(input_path),
-            "-vf", f"subtitles='{sub_escaped}':force_style='{ass_style}'",
+            "-vf", f"subtitles='{sub_escaped}':force_style='{ass_style}',{self._SETPARAMS_BT709}",
             "-c:v", codec, "-crf", str(crf),
             *self._COLOR_TAG_FLAGS,
             "-c:a", "copy",
@@ -3058,12 +3152,20 @@ class VideoCompose(BaseTool):
                 if "crf" not in inputs:
                     crf = profile.crf
                 profile_flags = ["-s", f"{profile.width}x{profile.height}", "-r", str(profile.fps)]
-            except (ImportError, ValueError):
-                pass  # proceed without profile
+            except ImportError:
+                pass  # lib unavailable — proceed with defaults
+            except ValueError as e:
+                # A typo'd profile name must NOT silently render the default
+                # aspect ratio: asking for a 9:16 delivery and getting 16:9 is
+                # an invisible, catastrophic substitution (found by E2E render
+                # inspection, 2026-07-17 — 'douyin_vertical' silently produced
+                # 1920x1080). get_profile's error already lists valid names.
+                return ToolResult(success=False, error=str(e))
 
         cmd = [
             "ffmpeg", "-y",
             "-i", str(input_path),
+            "-vf", self._SETPARAMS_BT709,
             "-c:v", codec, "-crf", str(crf), "-preset", preset,
             *self._COLOR_TAG_FLAGS,
             "-c:a", "aac", "-b:a", "192k",

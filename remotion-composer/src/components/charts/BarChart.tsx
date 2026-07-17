@@ -51,24 +51,34 @@ export const BarChart: React.FC<BarChartProps> = ({
   // clipped in the vertical 9:16 compositions real customer projects use.
   const chartLeft = Math.round(W * 0.073);
   const chartRight = W - Math.round(W * 0.073);
-  const chartTop = title ? Math.round(H * 0.148) : Math.round(H * 0.074);
-  const chartBottom = H - Math.round(H * 0.148);
   const chartWidth = chartRight - chartLeft;
-  const chartHeight = chartBottom - chartTop;
+  // The plot area is also bounded by its own WIDTH, then centred in the
+  // available band. Without this, 9:16 gave a 920×1352 plot whose bars
+  // rendered as ~67px-wide hairlines running the height of the frame
+  // (found by E2E render inspection, 2026-07-17).
+  const bandTop = title ? Math.round(H * 0.148) : Math.round(H * 0.074);
+  const bandBottom = H - Math.round(H * 0.148);
+  const chartHeight = Math.min(bandBottom - bandTop, Math.round(chartWidth * 1.05));
+  const chartTop = bandTop + Math.round((bandBottom - bandTop - chartHeight) / 2);
+  const chartBottom = chartTop + chartHeight;
 
   // Type scale follows the smaller dimension so vertical 9:16 keeps the
   // same optical size (item 19: the old 20-22px labels were illegibly
   // small on a 1080p+ frame).
   const fs = (n: number) => Math.round((n * Math.min(W, H)) / 1080);
 
+  // Slot-based distribution: each bar owns an equal share of the plot width
+  // and is centred in its slot, so bars span the full axis. The old code
+  // packed them adjacently at a capped width and centred the whole cluster,
+  // leaving a huddle in the middle third with the axis empty on both sides.
+  // Bar width is also tied to plot HEIGHT so bars never read as hairlines.
   const barCount = data.length;
-  const totalGap = barGap * (barCount + 1);
-  const barWidth = Math.min(
-    (chartWidth - totalGap) / barCount,
-    Math.round(W * 0.0625)
+  const slotWidth = chartWidth / barCount;
+  const barWidth = Math.max(
+    8,
+    Math.min(slotWidth - barGap, Math.round(chartHeight * 0.2))
   );
-  const actualTotalWidth = barCount * barWidth + (barCount + 1) * barGap;
-  const offsetX = chartLeft + (chartWidth - actualTotalWidth) / 2;
+  const barXFor = (i: number) => chartLeft + slotWidth * i + (slotWidth - barWidth) / 2;
 
   // Grid lines
   const gridLineCount = 5;
@@ -181,7 +191,7 @@ export const BarChart: React.FC<BarChartProps> = ({
         {/* Bars */}
         {data.map((datum, i) => {
           const color = colors[i % colors.length];
-          const barX = offsetX + barGap + i * (barWidth + barGap);
+          const barX = barXFor(i);
           const barHeightFull = (datum.value / maxValue) * chartHeight;
           const staggerDelay = i * 4;
 

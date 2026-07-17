@@ -86,3 +86,51 @@ class TestPlaybookThemeBridge:
         resolved = VideoCompose._resolve_subtitle_style(None, None, playbook)
         # Old `body.family` lookup matched nothing → font stayed default.
         assert resolved["font"] == playbook["typography"]["body"]["font"]
+
+
+class TestCaptionHighlightContrast:
+    """The active-word highlight must be legible on its own scrim.
+
+    Found by E2E render inspection (2026-07-17): captionHighlightColor was
+    hardcoded to the playbook's `primary`, so a dark-primary playbook shipped
+    an invisible highlight — anime-ghibli rendered #2D5016 forest green on the
+    #0F172A scrim at 1.93:1, below even the 3:1 WCAG large-text floor. Root's
+    hand-authored THEMES use `accent` for this, so the bridge contradicted the
+    theme it exists to reproduce.
+    """
+
+    def test_dark_primary_playbook_uses_legible_accent(self):
+        from styles.playbook_loader import validate_contrast
+
+        theme = VideoCompose._build_theme_from_playbook("anime-ghibli", None)
+        # accent, not the near-invisible dark-green primary
+        assert theme["captionHighlightColor"] == "#FFB347"
+        assert theme["captionHighlightColor"] != "#2D5016"
+        assert validate_contrast("#FFB347", "#0F172A")["large_text"]["AA"] is True
+
+    def test_every_playbook_caption_highlight_passes_wcag_large(self):
+        from styles.playbook_loader import list_playbooks, validate_contrast
+
+        for name in list_playbooks():
+            theme = VideoCompose._build_theme_from_playbook(name, None)
+            scrim = (
+                "#FFFFFF" if "rgba(255" in theme["captionBackgroundColor"] else "#0F172A"
+            )
+            result = validate_contrast(theme["captionHighlightColor"], scrim)
+            assert result["large_text"]["AA"] is True, (
+                f"{name}: highlight {theme['captionHighlightColor']} on {scrim} "
+                f"is {result['ratio']}:1 — below the 3:1 large-text floor"
+            )
+
+    def test_falls_back_to_neutral_when_no_candidate_passes(self):
+        # Both candidates invisible on a dark scrim → guaranteed-legible light.
+        assert (
+            VideoCompose._pick_caption_highlight(["#111111", "#0A0A0A"], "#0F172A", False)
+            == "#F8FAFC"
+        )
+
+    def test_prefers_first_passing_candidate(self):
+        assert (
+            VideoCompose._pick_caption_highlight(["#111111", "#FFB347"], "#0F172A", False)
+            == "#FFB347"
+        )
