@@ -242,21 +242,47 @@ declaring a render complete:
 
 1. **`npx hyperframes lint`** — static contract checks (duplicate ids,
    overlapping tracks, missing `data-composition-id`, unregistered timelines).
-   MUST pass before render.
-2. **`npx hyperframes validate`** — browser-based runtime checks: seeks into
-   the paused composition, screenshots, samples pixels, computes WCAG
-   contrast ratios, verifies `window.__timelines` registration and
-   `class="clip"` on timed elements. MUST pass before render (contrast can
-   be deferred with `--no-contrast` during iteration, but not for final).
+   MUST pass before render. Fast, no browser.
+2. **`npx hyperframes check`** — browser-based gate. Runs lint, runtime,
+   layout, motion, and WCAG contrast in **one** browser session: seeks into
+   the paused composition, screenshots, samples pixels, computes contrast
+   ratios, verifies `window.__timelines` registration and `class="clip"` on
+   timed elements. MUST pass before render (contrast can be deferred with
+   `--no-contrast` during iteration, but not for final).
+   Since it includes lint, step 1 is only worth running on its own as a fast
+   pre-check while iterating.
 3. **`npx hyperframes render --quality standard`** — produces the MP4.
 4. **Post-render final review** — probe with ffprobe, sample frames,
    transcribe audio, compare to script. Same contract as the Remotion path.
    See `final_review.schema.json`.
 
-If lint or validate fails, do **not** render. Fix the composition and re-run.
+> **`hyperframes validate` is deprecated** (as of v0.7.60) and prints a
+> deprecation notice on stderr; its JSON report carries
+> `_meta.deprecated: true`. Use `check`. Note the reports are **not**
+> interchangeable: `validate` returned a flat
+> `{ok, errors[], warnings[], contrastFailures}`, while `check` returns one
+> section per pass — `{ok, lint{}, runtime{}, layout{}, motion{}, contrast{},
+> snapshots{}}` — each with its own `ok`/`errorCount`/`findings[]`. Anything
+> parsing the old field names must be updated.
+
+If lint or check fails, do **not** render. Fix the composition and re-run.
 Silent render from a failing composition is a contract violation — the whole
-point of HyperFrames is that validate catches issues that FFmpeg or Remotion
+point of HyperFrames is that this gate catches issues that FFmpeg or Remotion
 cannot.
+
+**Reading `check`'s verdict:** its top-level `ok` (and exit code) folds all
+five passes together, so a lint-only problem fails the whole command. When you
+need to know *what* failed, read the per-section `ok` — don't infer it from the
+exit code. One trap worth knowing: a missing local asset is reported under
+**lint**, and `runtime.ok` stays `true` — the opposite of `validate`, which
+surfaced it as a runtime 404.
+
+**Via the tool:** `hyperframes_compose` exposes this as `operation="validate"`
+— the operation name is a stable contract and deliberately did **not** follow
+the CLI rename. It runs `check` underneath and gates on lint + runtime +
+contrast; layout and motion are reported as advisory (they are new passes
+`validate` never ran, so they warn rather than block). `strict=true` promotes
+lint findings to blocking; `skip_contrast=true` skips only the contrast pass.
 
 ---
 
