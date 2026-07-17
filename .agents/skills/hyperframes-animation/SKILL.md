@@ -61,6 +61,16 @@ Multiple runtimes can coexist in one composition. Each registers its instances o
 
 **Prerequisite: `hyperframes-core` → Non-Negotiable Rules** (single paused timeline, `data-duration` governs length, no `Math.random` / `Date.now` / `performance.now`, no `repeat: -1`, no `gsap.set` on later-scene clips, no `display` / `visibility` animation, no timeline construction inside `async` / `setTimeout` / `Promise`). Don't restate those here.
 
+### Load GSAP from the workspace, never from a CDN
+
+Every snippet in this skill loads GSAP as `<script src="gsap.min.js"></script>` — a bare, relative src. That is deliberate, and copying it verbatim is correct. `lib/gsap_runtime.py` stages the pinned copy from `vendor/gsap/` into every workspace, at the root *and* in `compositions/`, so the same bare src resolves under both `validate` (which loads each composition in isolation) and `render` (which inlines it into `index.html`).
+
+**Never rewrite it to a CDN URL.** A CDN fetch puts the network on the render path, and the two CLI steps disagree about what that costs: `validate` fails loudly with `gsap is not defined`, while `render` exits **0** and writes an **un-animated MP4** carrying only a `sub_timeline_script_failure` warning. A silent downgrade like that is what [`AGENT_GUIDE.md`](../../../AGENT_GUIDE.md) forbids, and it is why renders pass `--no-best-effort`. This applies to hand-authored atelier compositions too. Full rationale: [`skills/core/hyperframes.md`](../../../skills/core/hyperframes.md).
+
+`TextPlugin.min.js` and `MotionPathPlugin.min.js` are staged the same way, so they load by a bare src too. Any other GSAP plugin has no vendored copy yet — add one to `vendor/gsap/` (and to `PLUGIN_SRCS` in `lib/gsap_runtime.py`) rather than pulling it from a CDN.
+
+To open or lint one of this skill's `examples/*.html` on its own, copy `vendor/gsap/gsap.min.js` beside it; that copy is gitignored on purpose, so the one tracked runtime stays `vendor/gsap/`.
+
 Animation-craft additions on top of core's contract:
 
 - **Pre-calculated layout constants** — never derive positions from `getBoundingClientRect()` at tween time. Tween-time DOM measurements desync because the renderer samples in parallel; compute coordinates once at composition setup and reuse.

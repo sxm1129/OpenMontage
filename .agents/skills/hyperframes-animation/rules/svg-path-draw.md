@@ -80,7 +80,7 @@ The path length is computed via the DOM API `path.getTotalLength()`.
 ## GSAP Timeline
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<script src="gsap.min.js"></script>
 <script>
   window.__timelines = window.__timelines || {};
 

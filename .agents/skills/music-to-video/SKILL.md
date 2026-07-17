@@ -148,8 +148,10 @@ Run the CLI on the **assembled project** — that's the correct unit (the per-fr
 Inspect at `t=0`, each frame start, the strongest DROP / SURGE, every `hard_stops[].t`, and the final frame. On failure, make the **cheapest safe fix** yourself: edit the offending `compositions/frames/NN-*.html`. Never change duration or audio timing to hide a sync issue. Once the gates pass, pause for user review, then render only on approval:
 
 ```bash
-( cd "$PROJECT_DIR" && npx hyperframes render . --skill=music-to-video -q draft -o renders/video.mp4 --fps 30 )
+( cd "$PROJECT_DIR" && npx hyperframes render . --skill=music-to-video -q draft -o renders/video.mp4 --fps 30 --no-best-effort )
 ```
+
+`--no-best-effort` is not optional. Without it `render` fails **open**: a sub-timeline whose script broke still exits 0 and writes a near-static MP4 carrying only a `sub_timeline_script_failure` warning — a silent downgrade [`AGENT_GUIDE.md`](../../../AGENT_GUIDE.md) forbids. `validate` catches that case and `render` does not, so the flag is what makes a broken frame a failed render instead of a shipped one.
 
 **Gate:** `lint` / `validate` / `inspect` passed; the user approved; `renders/video.mp4` exists with audio, duration == `audiomap.audio.duration_sec`. The final reply states the MP4 path and duration.
 

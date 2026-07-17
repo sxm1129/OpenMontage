@@ -127,7 +127,7 @@ Path A tweens the filter's `stdDeviation` attribute (a non-DOM-style numeric att
 ### Path A — directional SVG blur
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<script src="gsap.min.js"></script>
 <script>
   window.__timelines = window.__timelines || {};
   const tl = gsap.timeline({ paused: true });
@@ -156,7 +156,7 @@ Path A tweens the filter's `stdDeviation` attribute (a non-DOM-style numeric att
 ### Path B — echo / ghost trail
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<script src="gsap.min.js"></script>
 <script>
   window.__timelines = window.__timelines || {};
   const tl = gsap.timeline({ paused: true });

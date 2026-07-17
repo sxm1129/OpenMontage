@@ -9,7 +9,7 @@ The smallest renderable HyperFrames composition — a standalone (top-level) roo
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=1920, height=1080" />
     <title>Minimal HyperFrames Composition</title>
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="gsap.min.js"></script>
     <style>
       body {
         margin: 0;

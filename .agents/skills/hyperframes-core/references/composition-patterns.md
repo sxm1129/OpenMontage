@@ -43,7 +43,7 @@ When using sub-compositions, `index.html` should be **thin**. Its job is to decl
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="gsap.min.js"></script>
     <style>
       body {
         margin: 0;

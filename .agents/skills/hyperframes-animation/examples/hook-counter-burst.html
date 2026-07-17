@@ -31,7 +31,11 @@
           so it never overwrites the .icon-pos expansion tween
     -->
 
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <!-- GSAP is staged beside this file from vendor/gsap/ by lib/gsap_runtime.py. Never load it
+         from a CDN: a failed fetch makes `render` exit 0 with an un-animated MP4 (validate catches
+         it, render does not). See skills/core/hyperframes.md. To open or lint this file on its own,
+         copy vendor/gsap/gsap.min.js next to it. -->
+    <script src="gsap.min.js"></script>
 
     <style>
       :root {

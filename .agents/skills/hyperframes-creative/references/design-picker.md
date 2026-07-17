@@ -30,7 +30,7 @@ Read these before generating options — they define the rules your options must
 
    **Type pairings** (5-6) — **RUN the font discovery script from typography.md BEFORE generating pairings.** This is not optional. Download Google Fonts metadata, run the script, and pick from its output. You will otherwise reach for the same 8 fonts every time (Bricolage Grotesque, Instrument Serif, Fraunces, Archivo Black, DM Serif Display, Space Grotesk, Fredoka) — that's your training data default, not a contextual choice. Match the brand's energy and audience. Cross-category per typography.md (never two sans-serifs).
 
-2. `mkdir -p .hyperframes` then copy [../templates/design-picker.html](../templates/design-picker.html) to `.hyperframes/pick-design.html`.
+2. `mkdir -p .hyperframes`, then copy [../templates/design-picker.html](../templates/design-picker.html) to `.hyperframes/pick-design.html` **and `vendor/gsap/gsap.min.js` to `.hyperframes/gsap.min.js`**. The picker loads GSAP by a bare `src`, and `.hyperframes/` is not one of the directories `lib/gsap_runtime.py` stages into — without this second copy the picker opens un-animated. Do not point it back at a CDN.
 3. Replace these placeholders using Python (don't hand-escape quotes in sed):
    - `__ARCHITECTURES_JSON__` — array of architecture objects
    - `__PALETTES_JSON__` — array of palette objects

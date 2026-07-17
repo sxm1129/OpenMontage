@@ -3,7 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <title>tier-1-title-card</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+    <!-- GSAP is staged beside this file from vendor/gsap/ by lib/gsap_runtime.py. Never load it
+         from a CDN: a failed fetch makes `render` exit 0 with an un-animated MP4 (validate catches
+         it, render does not). See skills/core/hyperframes.md. To open or lint this file on its own,
+         copy vendor/gsap/gsap.min.js next to it. -->
+    <script src="gsap.min.js"></script>
     <style>
       html,
       body {
