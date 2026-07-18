@@ -73,9 +73,12 @@ LLM_MODEL = os.environ.get("MAAS_LLM_MODEL", "anthropic/claude-sonnet-4.6")
 # default (no timeout set here previously) left a hung gateway free to block
 # the asyncio.to_thread worker running a stage indefinitely — no error event,
 # no stage_retry, the job just sits at "running" forever with no user-visible
-# failure. 120s comfortably covers a normal completion (even one filling the
-# max_tokens=16384 cap below) while still bounding a genuine hang.
-LLM_REQUEST_TIMEOUT_SECONDS = 120.0
+# failure. The right ceiling depends on the gateway's throughput: a slow MaaS
+# endpoint at ~40 tok/s needs ~380s to fill the max_tokens=16384 cap below, so
+# a fixed 120s silently fails every long research/script completion there.
+# Hence env-overridable (MAAS_LLM_TIMEOUT_SECONDS); default stays 120 for fast
+# gateways where that comfortably bounds a genuine hang.
+LLM_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("MAAS_LLM_TIMEOUT_SECONDS", "120"))
 
 llm = OpenAI(api_key=MAAS_KEY, base_url=f"{MAAS_BASE}/v1", timeout=LLM_REQUEST_TIMEOUT_SECONDS)
 
