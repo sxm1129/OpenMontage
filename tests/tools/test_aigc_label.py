@@ -187,6 +187,7 @@ def test_hyperframes_index_html_includes_label_clip(tmp_path):
                   "--color-accent": "#0ff", "--font-body": "sans-serif",
                   "--font-heading": "sans-serif"},
         title="t",
+        gsap_src="vendor/gsap/gsap.min.js",
     )
     assert 'id="aigc-label"' in html
     assert "AI生成" in html
