@@ -28,6 +28,18 @@ belong to the compose stage's `profile`/`output_profile` selection (see
 Changing the runtime requires a logged `render_runtime_selection` decision —
 never silently.
 
+Two sibling proposal-locked fields need the same treatment — confirmed live
+(a full paid end-to-end run): `renderer_family` was absent from
+`edit_decisions` entirely, forcing the compose agent to guess and patch it
+in mid-render as a "data-completion fix". `composition_mode` was silently
+dropped too, which defeated the atelier/templated routing check in
+`video_compose._render` (`composition_mode == "atelier"`), silently
+downgrading an intended atelier render to the templated `cuts[]` path
+instead. Copy both forward unchanged from `production_plan.renderer_family`
+/ `production_plan.composition_mode` into `edit_decisions.renderer_family` /
+`edit_decisions.composition_mode` — same rule as `render_runtime`: no
+inventing, no omitting, no restructuring.
+
 ### 1. Lock The Anchor Cut First
 
 The viewer should understand the story before support overlays are added. If the anchor cut is weak, support layers will not save it.

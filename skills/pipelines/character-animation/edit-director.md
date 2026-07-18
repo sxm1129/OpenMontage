@@ -14,7 +14,12 @@ Produce `edit_decisions` and `action_timeline`.
    resolution/fps/aspect_ratio belong to the compose stage's `profile`
    selection (`lib/media_profiles.py`), not to this field. Changing the
    runtime requires a logged `render_runtime_selection` decision — never
-   silently.
+   silently. If the render_runtime path routes through `video_compose`'s
+   templated Remotion dispatch, `renderer_family` and `composition_mode`
+   need the same carry-forward treatment — confirmed live elsewhere:
+   omitting `renderer_family` forces the compose agent to guess it
+   mid-render, and dropping `composition_mode` silently downgrades an
+   intended atelier render to the templated path instead.
 2. Convert scene beats into timed character actions.
 3. Add anticipation, hold, action, and follow-through where appropriate.
 4. Align mouth/gesture beats to dialogue or music.

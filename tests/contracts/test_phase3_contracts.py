@@ -353,6 +353,33 @@ class TestSkillsExist:
             f"has no instruction to carry it forward unchanged from proposal."
         )
 
+    @pytest.mark.parametrize("pipeline_name", list_pipelines())
+    def test_edit_director_carries_renderer_family_and_composition_mode_forward(self, pipeline_name):
+        """Regression: confirmed live (the same end-to-end run as the
+        render_runtime test above) that renderer_family and composition_mode
+        have the identical undocumented-field gap. renderer_family being
+        absent from edit_decisions forced the compose agent to guess it
+        mid-render as a "data-completion fix". composition_mode being absent
+        defeated video_compose._render's atelier-routing check
+        (composition_mode == "atelier"), silently downgrading an intended
+        atelier render to the templated cuts[] path — which then rendered
+        background-only because CinematicRenderer/TalkingHead read their
+        clips from scenes[]/videoSrc, not cuts[] (see
+        test_remotion_diagnostics.py's composition-guard tests).
+        """
+        manifest = load_pipeline(pipeline_name)
+        if "video_compose" not in get_required_tools(manifest):
+            pytest.skip(f"{pipeline_name} does not use video_compose")
+        skill_path = get_stage_skill(manifest, "edit")
+        if not skill_path:
+            pytest.skip(f"{pipeline_name} has no 'edit' stage")
+        content = (self.SKILLS_DIR / f"{skill_path}.md").read_text(encoding="utf-8")
+        for field in ("renderer_family", "composition_mode"):
+            assert field in content, (
+                f"{skill_path}.md never mentions {field} — the edit agent has "
+                f"no instruction to carry it forward unchanged from proposal."
+            )
+
 
 # ---- Remotion Scaffold ----
 
