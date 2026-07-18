@@ -1393,6 +1393,35 @@ class VideoCompose(BaseTool):
 
         return None
 
+    @staticmethod
+    def _resolve_manifest_asset_path(raw: str, output_path: Path) -> str:
+        """Turn an asset_manifest path (e.g. "assets/video/sc-01.mp4",
+        intentionally project-relative — the /media/<project>/<rel> URL
+        convention depends on it) into an absolute one anchored at the job's
+        project_dir, derived from output_path.
+
+        Confirmed live: without this, a project-relative manifest path reached
+        _stage_public_assets still relative. That function's contract (pinned
+        by test_public_relative_paths_untouched) is to leave already-staged
+        public-relative paths untouched — a reasonable rule for its own output,
+        but a manifest path was never staged, so being left alone means it's
+        handed to Remotion as-is. staticFile() then 404s on it silently, and
+        the render "succeeds" with only the background composited — no clips,
+        images, or overlays. output_path is reliably <project_dir>/renders/
+        <file> (tool_bridge anchors it there — see _anchor_output_path), so
+        project_dir is its grandparent; anything already absolute, or an
+        unrecognized output_path shape, passes through untouched.
+        """
+        if not raw:
+            return raw
+        p = Path(raw)
+        if p.is_absolute():
+            return raw
+        if output_path.parent.name != "renders":
+            return raw
+        project_dir = output_path.parent.parent
+        return str((project_dir / p).resolve())
+
     def _render(self, inputs: dict[str, Any]) -> ToolResult:
         """High-level render: assemble edit decisions + asset manifest into final video.
 
@@ -1479,7 +1508,9 @@ class VideoCompose(BaseTool):
             source_id = cut.get("source", "")
             resolved_cut = dict(cut)
             if source_id in asset_lookup:
-                resolved_cut["source"] = asset_lookup[source_id]["path"]
+                resolved_cut["source"] = self._resolve_manifest_asset_path(
+                    asset_lookup[source_id]["path"], output_path,
+                )
             resolved_cuts.append(resolved_cut)
 
         # Same for ASSET overlays. Cuts got this treatment from day one but
@@ -1497,7 +1528,9 @@ class VideoCompose(BaseTool):
                     # Real artifacts namespace these ("asset_manifest:hero_card").
                     asset = asset_lookup.get(asset_id.split(":", 1)[1])
                 if asset is not None:
-                    resolved_overlay["source"] = asset["path"]
+                    resolved_overlay["source"] = self._resolve_manifest_asset_path(
+                        asset["path"], output_path,
+                    )
                 elif not overlay.get("source"):
                     logging.getLogger("video_compose").warning(
                         "Overlay asset_id %r is not in the asset_manifest — "

@@ -148,6 +148,48 @@ class TestStagePublicAssets:
         finally:
             _cleanup(props["cuts"][0]["source"])
 
+    def test_relative_manifest_path_now_gets_staged_end_to_end(self, tmp_path):
+        # Regression: asset_manifest paths are project-relative by convention
+        # (e.g. "assets/video/sc-01.mp4"). _resolve_manifest_asset_path must
+        # make that absolute BEFORE it reaches _stage_public_assets — feeding
+        # it the raw relative string hits the
+        # test_public_relative_paths_untouched contract above and the clip
+        # never gets staged (confirmed live: a full paid run rendered only
+        # the background, no clips/images/overlays composited).
+        project_dir = tmp_path / "projects" / "some-job"
+        clip = project_dir / "assets" / "video" / "sc-01.mp4"
+        clip.parent.mkdir(parents=True)
+        clip.write_bytes(b"fake-video-bytes")
+        output_path = project_dir / "renders" / "final.mp4"
+
+        resolved = VideoCompose._resolve_manifest_asset_path(
+            "assets/video/sc-01.mp4", output_path,
+        )
+        assert Path(resolved).is_absolute()
+        assert Path(resolved) == clip
+
+        props = {"cuts": [{"id": "c1", "source": resolved}]}
+        _, staged = VideoCompose()._stage_public_assets(props)
+        src = props["cuts"][0]["source"]
+        try:
+            assert staged == 1
+            assert src.startswith("om-staged/")
+        finally:
+            _cleanup(src)
+
+    def test_resolve_manifest_asset_path_absolute_passthrough(self, asset):
+        assert VideoCompose._resolve_manifest_asset_path(
+            str(asset), Path("/anywhere/renders/final.mp4"),
+        ) == str(asset)
+
+    def test_resolve_manifest_asset_path_unknown_output_shape_passthrough(self):
+        # output_path not under a renders/ dir — no safe anchor, leave as-is
+        # rather than guessing wrong.
+        raw = "assets/video/sc-01.mp4"
+        assert VideoCompose._resolve_manifest_asset_path(
+            raw, Path("/tmp/output.mp4"),
+        ) == raw
+
     def test_captions_and_text_are_never_mangled(self, asset):
         # Traversal is an explicit key list, not "anything that looks like a
         # path" — a caption word must survive untouched.
