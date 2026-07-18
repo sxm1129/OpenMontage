@@ -132,6 +132,58 @@ def test_music_search_tool_auto_assigned_mp3_extension(tmp_path, monkeypatch):
     assert not tool.executed_with["output_path"].endswith(".bin")
 
 
+def test_relative_input_path_anchored_to_project_dir_when_it_exists(tmp_path, monkeypatch):
+    """Regression: render_report.outputs[].path and asset_manifest.assets[].path
+    are intentionally project-relative (e.g. "renders/x.mp4"). Confirmed live:
+    the publish stage passed that value straight through as input_path to
+    video_trimmer/auto_reframe/video_compose(extract_poster) — all three
+    failed with "Input not found", even though the hero file had existed under
+    project_dir the entire time. Only output_path was ever re-anchored."""
+    hero = tmp_path / "renders" / "hero.mp4"
+    hero.parent.mkdir(parents=True)
+    hero.write_bytes(b"fake-video-bytes")
+
+    tool = FakeTool(capability="video_post")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    args = {
+        "tool_name": "video_trimmer",
+        "inputs": {"operation": "cut", "input_path": "renders/hero.mp4"},
+    }
+    execute_tool("run_openmontage_tool", args, tmp_path)
+    assert tool.executed_with["input_path"] == str(hero.resolve())
+
+
+def test_relative_input_path_left_alone_when_not_found_anywhere(tmp_path, monkeypatch):
+    # No file at project_dir/renders/missing.mp4 — leave the path as given so
+    # the tool's own error names what the agent actually passed.
+    tool = FakeTool(capability="video_post")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    args = {
+        "tool_name": "video_trimmer",
+        "inputs": {"operation": "cut", "input_path": "renders/missing.mp4"},
+    }
+    execute_tool("run_openmontage_tool", args, tmp_path)
+    assert tool.executed_with["input_path"] == "renders/missing.mp4"
+
+
+def test_absolute_input_path_untouched(tmp_path, monkeypatch):
+    tool = FakeTool(capability="video_post")
+    from tools import tool_registry
+    monkeypatch.setattr(tool_registry.registry, "ensure_discovered", lambda *a, **k: None)
+    monkeypatch.setattr(tool_registry.registry, "get", lambda name: tool)
+    abs_path = str(tmp_path / "elsewhere" / "clip.mp4")
+    args = {
+        "tool_name": "video_trimmer",
+        "inputs": {"operation": "cut", "input_path": abs_path},
+    }
+    execute_tool("run_openmontage_tool", args, tmp_path)
+    assert tool.executed_with["input_path"] == abs_path
+
+
 def test_cost_to_cny_passes_through_cny_declared_tool():
     from app.runner.tool_bridge import _cost_to_cny
     assert _cost_to_cny(FakeTool(cost_currency="CNY"), 1.0) == 1.0

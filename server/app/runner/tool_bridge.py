@@ -756,6 +756,26 @@ def execute_tool(
             anchored.parent.mkdir(parents=True, exist_ok=True)
             inputs = {**inputs, "output_path": str(anchored)}
 
+        # Anchor a relative input_path the same way output_path already is.
+        # render_report.outputs[].path and asset_manifest.assets[].path are
+        # intentionally project-relative (e.g. "renders/x.mp4") — every tool
+        # that reads a file via "input_path" (video_trimmer, auto_reframe,
+        # video_compose's extract_poster, audio_enhance, ...) gets that value
+        # passed straight through and resolves it against the server's CWD,
+        # not project_dir, so a file that has existed the whole time 404s as
+        # "not found". Confirmed live: the publish stage's derivative calls
+        # (teaser cut, portrait reframe, poster extract) all failed this way
+        # against the hero export. Only rewrite when the project-relative
+        # candidate actually exists — otherwise leave it alone so the tool's
+        # own error names the path the agent actually gave.
+        if "input_path" in inputs:
+            raw_input = inputs["input_path"]
+            p = Path(raw_input)
+            if not p.is_absolute():
+                candidate = (project_dir / p).resolve()
+                if candidate.is_file():
+                    inputs = {**inputs, "input_path": str(candidate)}
+
         # Hard budget ceiling — pre-call check. Bounds total spend to <= budget
         # by refusing a paid call that would cross it, instead of letting a
         # single stage (e.g. assets) generate many clips past the ceiling before
