@@ -380,6 +380,35 @@ class TestSkillsExist:
                 f"no instruction to carry it forward unchanged from proposal."
             )
 
+    @pytest.mark.parametrize("pipeline_name", list_pipelines())
+    def test_publish_director_calls_export_bundle_before_claiming_files(self, pipeline_name):
+        """Regression: confirmed live (a full paid end-to-end run) that a
+        publish-director skill taught the agent to conceptually "separate
+        hero and derivatives" and write publish_log metadata describing them
+        — with zero instruction to actually call a tool that produces the
+        files. The agent wrote a publish_log claiming three derivative
+        exports that didn't exist on disk anywhere in the project; the
+        anti-fabrication guard failed the job (correctly). Every pipeline
+        with an export_bundle-capable publish stage must tell its
+        publish-director to call export_bundle (and name it, so the agent
+        actually invokes the tool rather than hand-writing a publish_log).
+        """
+        manifest = load_pipeline(pipeline_name)
+        if "export_bundle" not in get_required_tools(manifest):
+            pytest.skip(f"{pipeline_name} does not use export_bundle")
+        skill_path = get_stage_skill(manifest, "publish")
+        if not skill_path:
+            pytest.skip(f"{pipeline_name} has no 'publish' stage")
+        full_path = self.SKILLS_DIR / f"{skill_path}.md"
+        assert full_path.exists(), f"Missing publish-director skill: {full_path}"
+        content = full_path.read_text(encoding="utf-8")
+        assert "export_bundle" in content, (
+            f"{skill_path}.md never mentions export_bundle — the publish "
+            f"agent has no instruction to actually produce the hero export "
+            f"instead of hand-writing a publish_log describing files that "
+            f"don't exist."
+        )
+
 
 # ---- Remotion Scaffold ----
 

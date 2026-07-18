@@ -36,10 +36,37 @@ Recommended metadata keys:
 - `source_mix_notes`
 - `platform_copy_map`
 
-### 4. Quality Gate
+### 4. Produce The Real Files Before Claiming Them
+
+Confirmed live (a full paid end-to-end run, a different pipeline): a publish
+stage wrote a `publish_log` claiming derivative exports that didn't exist on
+disk — the anti-fabrication guard failed the job; it will fail yours too.
+`publish_log` may only describe a file a tool call in THIS turn actually
+produced:
+
+- **Master export**: call `export_bundle(video_path=<render_report's final
+  output path>, title=..., description=..., tags=..., hashtags=...)`. It
+  copies the file into `exports/<project>/` and returns a schema-valid
+  `publish_log` in `data["publish_log"]` — persist that, don't hand-write one.
+- **Short-form derivative**: call `video_trimmer(operation="cut", ...)` for a
+  shorter duration.
+- **Format variant**: call `auto_reframe(input_path=..., output_path=...,
+  target_aspect="portrait"/"square")` — the file must exist before you
+  mention it.
+- **Poster / thumbnail frame**: call `video_compose(operation="extract_poster",
+  input_path=<master path>, output_path=...)`.
+- **`youtube_upload`** requires the user's explicit approval for THIS run
+  before you call it — publishing live is not a default action.
+
+If you skip a promised variant, say so and drop it from `derivative_outputs`
+— never describe it as delivered.
+
+### 5. Quality Gate
 
 - master and variants are clearly labeled,
 - metadata matches the true source mix,
+- every export referenced in `publish_log` was actually produced by a tool
+  call this turn — no file, no entry,
 - export folders are organized by purpose,
 - the package is ready to use without manual cleanup.
 

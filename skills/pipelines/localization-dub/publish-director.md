@@ -30,10 +30,26 @@ Recommended metadata keys:
 
 If a language output has pronunciation caveats, timing warnings, or missing lip sync, keep that note in the published package.
 
-### 4. Quality Gate
+### 4. Produce The Real Package Before Claiming It
+
+Confirmed live (a full paid end-to-end run, a different pipeline): a publish
+stage wrote a `publish_log` claiming exports that didn't exist on disk — the
+anti-fabrication guard failed the job; it will fail yours too. Every
+video/subtitle/transcript path in a locale package must already be a real
+file from an earlier stage — don't invent a path for a locale that was never
+actually dubbed or subtitled. To package a locale's files for hand-off, call
+`export_bundle(video_path=<that locale's real output path>, title=...,
+description=..., subtitles_path=<real .srt path if present>, ...)` per
+locale; it copies the files into `exports/<project>/` and returns a
+schema-valid `publish_log` entry — merge those rather than hand-writing
+paths. `youtube_upload` requires the user's explicit approval for THIS run
+before you call it — publishing live is not a default action.
+
+### 5. Quality Gate
 
 - locale packages are clearly labeled,
 - metadata matches the actual treatment,
+- every file referenced is a real, produced file — no file, no entry,
 - supporting text assets are present,
 - warnings and review notes are not lost.
 

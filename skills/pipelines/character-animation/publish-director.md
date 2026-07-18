@@ -14,12 +14,29 @@ strong character-forward thumbnail concept.
 - If the final is inspired by a reference, describe the inspiration without
   claiming duplication.
 
+## Producing The Files
+
+Confirmed live (a full paid end-to-end run, a different pipeline): a publish
+stage wrote a `publish_log` claiming exports that didn't exist on disk — the
+anti-fabrication guard failed the job; it will fail yours too. `publish_log`
+may only describe a file a tool call in THIS turn actually produced:
+
+- Call `export_bundle(video_path=<render_report's final output path>,
+  title=..., description=..., tags=...)`. It copies the file into
+  `exports/<project>/` and returns a schema-valid `publish_log` in
+  `data["publish_log"]` — persist that, don't hand-write one.
+- For the poster frame, call `video_compose(operation="extract_poster",
+  input_path=<video path>, output_path=...)` rather than only writing notes
+  about where the character's emotion reads best.
+- `youtube_upload` requires the user's explicit approval for THIS run before
+  you call it — publishing live is not a default action.
+
 ## Output
 
 Produce `publish_log` with:
 
-- final video path,
-- thumbnail/poster-frame notes,
+- final video path (from `export_bundle`'s real output),
+- thumbnail/poster-frame path (from `video_compose`'s real output),
 - title ideas,
 - description,
 - platform-specific export notes,

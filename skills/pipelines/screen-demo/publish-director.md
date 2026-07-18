@@ -66,10 +66,35 @@ For developer or product-demo content, also package:
 - software/version mentions,
 - error terms if it is a troubleshooting demo.
 
-### 5. Quality Gate
+### 5. Produce The Real Files Before Claiming Them
+
+Confirmed live (a full paid end-to-end run, a different pipeline): a publish
+stage wrote a `publish_log` claiming derivative exports that didn't exist on
+disk — the anti-fabrication guard failed the job; it will fail yours too.
+`publish_log` may only describe a file a tool call in THIS turn actually
+produced:
+
+- **Package**: call `export_bundle(video_path=<render_report's final output
+  path>, title=..., description=..., tags=..., chapters=...)`. It copies the
+  file into `exports/<project>/` and returns a schema-valid `publish_log` in
+  `data["publish_log"]` — persist that, don't hand-write one.
+- **Thumbnail frame**: call `video_compose(operation="extract_poster",
+  input_path=<video path>, output_path=...)` rather than only storing a
+  concept in `publish_log.metadata.thumbnail_concepts`.
+- **Platform cutdown**, if promised: call `video_trimmer(operation="cut", ...)`
+  and/or `auto_reframe(...)` — the file must exist before you mention it.
+- **`youtube_upload`** requires the user's explicit approval for THIS run
+  before you call it — publishing live is not a default action.
+
+If you skip a promised variant, say so and drop it — never describe it as
+delivered.
+
+### 6. Quality Gate
 
 - metadata names the real tool and task,
 - chapters match the actual rendered flow,
+- every export referenced in `publish_log` was actually produced by a tool
+  call this turn — no file, no entry,
 - export folders are clean and reusable,
 - copy is tailored to the platform instead of duplicated.
 

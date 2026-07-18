@@ -46,10 +46,28 @@ Store in `publish_log.metadata`:
 - `platform_copy_map`
 - `schedule_notes`
 
-### 5. Quality Gate
+### 5. Produce The Real Package Before Claiming It
+
+Confirmed live (a full paid end-to-end run, a different pipeline): a publish
+stage wrote a `publish_log` claiming exports that didn't exist on disk — the
+anti-fabrication guard failed the job; it will fail yours too. Every clip in
+`clip_catalog` must already be a real, rendered file from `render_report` —
+don't invent a path for a clip that was never composed. To actually package
+each clip for hand-off, call `export_bundle(video_path=<that clip's real
+output path>, title=..., description=..., tags=..., hashtags=...)` once per
+clip you're publishing; it copies the file into `exports/<project>/` and
+returns a schema-valid `publish_log` entry — merge those rather than
+hand-writing the paths. If a platform variant (a reframed or re-cut version
+of a clip) is promised, call `auto_reframe`/`video_trimmer` to actually
+produce it first. `youtube_upload` requires the user's explicit approval for
+THIS run before you call it — publishing live is not a default action.
+
+### 6. Quality Gate
 
 - strongest clips lead the rollout,
 - captions are platform-specific,
+- every file referenced in `clip_catalog`/`publish_log` is a real, produced
+  file — no file, no entry,
 - export folders are usable without extra cleanup,
 - the batch catalog clearly links ranking, file paths, and publishing intent.
 

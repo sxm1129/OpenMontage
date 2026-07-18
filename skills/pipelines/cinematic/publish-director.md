@@ -42,10 +42,42 @@ Store in `publish_log.metadata`:
 - `poster_frame_notes`
 - `distribution_notes`
 
-### 4. Quality Gate
+### 4. Produce The Real Files Before Claiming Them
+
+Confirmed live (a full paid end-to-end run): a publish stage wrote a
+`publish_log` claiming three derivative exports — a WeChat teaser, an XHS
+social cutdown, a poster frame — none of which existed on disk. The
+anti-fabrication guard failed the job; it will fail yours too.
+`publish_log` may only describe a file a tool call in THIS turn actually
+produced. For each deliverable:
+
+- **Hero export**: call `export_bundle(video_path=<render_report's final
+  output path>, title=..., description=..., tags=..., hashtags=...)`. It
+  copies the file into `exports/<project>/` and returns a schema-valid
+  `publish_log` in `data["publish_log"]` — persist that, don't hand-write one.
+- **Teaser / short cutdown** (a shorter duration of the hero): call
+  `video_trimmer(operation="cut", input_path=<hero path>, output_path=...,
+  start_seconds=..., end_seconds=...)` — the file must exist before you
+  mention it.
+- **Social / vertical cutdown** (aspect-ratio change): call
+  `auto_reframe(input_path=<hero or trimmed path>, output_path=...,
+  target_aspect="portrait")` (or `"square"`).
+- **Poster / thumbnail frame**: call `video_compose(operation="extract_poster",
+  input_path=<hero path>, output_path=...)`.
+- **`youtube_upload`** (a real, live publish) requires the user's explicit
+  approval for THIS run before you call it — publishing is not a default
+  action. Without that approval, describe the export as ready for manual
+  upload instead.
+
+If a tool call fails or you choose to skip a promised derivative, say so in
+`publish_log` and drop it from the deliverable list — do not describe it as
+delivered anyway.
+
+### 5. Quality Gate
 
 - hero export is clearly identified,
-- derivative exports are labeled by purpose,
+- every derivative referenced in `publish_log` was actually produced by a tool
+  call this turn — no file, no entry,
 - metadata fits the tone,
 - the package is usable without manual cleanup.
 

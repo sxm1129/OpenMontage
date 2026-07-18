@@ -21,31 +21,40 @@ Create platform-specific metadata:
 - **Tags**: Derived from brief's key_points
 - **Chapters**: From script section timestamps
 
-### Step 2: Thumbnail Concept
+### Step 2: Thumbnail Frame
 
-Describe or generate a thumbnail:
-- Extract a compelling frame from the footage (if frame_sampler available)
-- Add text overlay concept (title or key stat)
+Call `video_compose(operation="extract_poster", input_path=<render_report's
+final output path>, output_path=...)` to actually extract a real frame, then
+note the text-overlay concept (title or key stat) alongside it. Do not only
+describe a concept when the tool can produce the real frame.
 
 ### Step 3: Package Export
 
-Create the export directory:
-- Video file
-- Metadata JSON
-- Description text file
-- Chapter markers
-- Thumbnail concept
+Call `export_bundle(video_path=<render_report's final output path>, title=...,
+description=..., tags=..., chapters=..., thumbnail_path=<the frame from Step
+2>)`. It lays out the export directory (video, metadata JSON, description
+text, chapter markers, thumbnail) and returns a schema-valid `publish_log` in
+`data["publish_log"]` — persist that directly rather than hand-building one.
+`youtube_upload` requires the user's explicit approval for THIS run before
+you call it — publishing live is not a default action.
+
+Confirmed live (a full paid end-to-end run, a different pipeline): a publish
+stage wrote a `publish_log` claiming exports that didn't exist on disk — the
+anti-fabrication guard failed the job; it will fail yours too. Only describe
+a file `export_bundle` (or another tool call) actually produced.
 
 ### Step 4: Build Publish Log
 
-Document the publish event with platform, status (draft), and export path.
+Persist the `publish_log` `export_bundle` returned (Step 3) — do not
+hand-build a separate one. It already documents platform, status, and export
+path correctly.
 
 ### Step 5: Self-Evaluate
 
 | Criterion | Question |
 |-----------|----------|
 | **Metadata quality** | Is the title compelling and description informative? |
-| **Completeness** | Is the export package complete? |
+| **Completeness** | Is the export package complete, and is every file real? |
 
 ### Step 6: Submit
 
