@@ -19,13 +19,15 @@
 //
 // Reads:  --storyboard STORYBOARD.md, --hyperframes <root>, [--audiomap audiomap.json],
 //         [--bgm assets/bgm.mp3], [--audio-meta audio_meta.json]. On disk: each frame's src html.
-// Writes: <project>/index.html
+// Writes: <project>/index.html, <project>/gsap.min.js (staged from vendor/gsap/)
 //
 // Exit 0 = index.html written + summary. Exit 1 = fatal contract break (no
-// frames, a frame missing/empty/with-no-duration, an inner id mismatch).
+// frames, a frame missing/empty/with-no-duration, an inner id mismatch, the
+// vendored GSAP missing).
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseStoryboard } from "./lib/storyboard.mjs";
 
 const argv = process.argv.slice(2);
@@ -167,6 +169,22 @@ if (existsSync(join(hyperframesDir, bgmRel))) {
   anomalies.push(`BGM not found at ${bgmRel} — index has no music track`);
 }
 
+// ---------- stage GSAP ----------
+// index.html is the only host that loads GSAP; frames use its global (see
+// sub-agents/frame-worker.md). Staging the pinned copy next to index.html keeps
+// the network off the render path — a CDN fetch that fails makes `validate` exit
+// 1 but lets `render` exit 0 with a near-static MP4 and only a
+// `sub_timeline_script_failure` warning. Mirrors lib/gsap_runtime.py.
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
+const VENDORED_GSAP = join(REPO_ROOT, "vendor", "gsap", "gsap.min.js");
+const GSAP_SRC = "gsap.min.js";
+if (!existsSync(VENDORED_GSAP))
+  die(
+    `vendored GSAP missing at ${VENDORED_GSAP}. It is committed to the repo on purpose — ` +
+      `compositions must not fetch it from a CDN. Restore it with: npm pack gsap@3.14.2`,
+  );
+copyFileSync(VENDORED_GSAP, join(hyperframesDir, GSAP_SRC));
+
 // ---------- head + emit ----------
 const headStyle = [
   "      * { margin: 0; padding: 0; box-sizing: border-box; }",
@@ -180,7 +198,7 @@ const html = `<!doctype html>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=${WIDTH}, height=${HEIGHT}" />
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script src="${GSAP_SRC}"></script>
     <style>
 ${headStyle}
     </style>
@@ -211,6 +229,7 @@ console.log(`  canvas:           ${WIDTH}×${HEIGHT}`);
 console.log(`  frames (track 1): ${mounted.length}`);
 console.log(`  bgm (track 11):   ${bgmEmitted ? bgmRel : "MISSING"}`);
 console.log(`  vo (track 10):    ${voiceCount}`);
+console.log(`  gsap:             ${GSAP_SRC} (staged from vendor/gsap/)`);
 console.log(`  total duration:   ${TOTAL}s` + (audioDur != null ? ` (audio ${audioDur}s)` : ""));
 if (anomalies.length) {
   console.log(`\nanomalies (non-fatal):`);

@@ -76,14 +76,29 @@ The runtime registers these adapters in order; each implements `discover()` / `s
 
 | Adapter                            | What it drives                                                                | How to load                                                     | Notable                                                                                                   |
 | ---------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| GSAP (createGsapAdapter)           | The primary timeline + all tweens registered on `window.__timelines[<id>]`    | CDN `https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js` | Plugins via standard GSAP register; HyperFrames does NOT patch THREE.Clock (uses `__hfThreeTime` instead) |
+| GSAP (createGsapAdapter)           | The primary timeline + all tweens registered on `window.__timelines[<id>]`    | Local `gsap.min.js`, staged into the workspace from `vendor/gsap/` — **never a CDN** (see below) | Plugins via standard GSAP register; HyperFrames does NOT patch THREE.Clock (uses `__hfThreeTime` instead) |
 | Anime.js v4 (createAnimeJsAdapter) | Anime instances pushed to `window.__hfAnime`                                  | CDN `animejs@4.0.2/lib/anime.iife.min.js` or ESM                | Adapter multiplies composition seconds by 1000 for ms                                                     |
 | CSS animations (createCssAdapter)  | Any element with computed `animation-name`                                    | Declarative `@keyframes`                                        | Falls back to negative `animation-delay` when WAAPI unavailable                                           |
 | WAAPI (createWaapiAdapter)         | All Animation objects on document                                             | `element.animate()`                                             | Uses `document.getAnimations()`                                                                           |
 | Lottie (createLottieAdapter)       | `window.__hfLottie` array; supports lottie-web + dotlottie-web                | CDN `lottie.min.js` + `@lottiefiles/dotlottie-web`              | `goToAndStop(time*1000)` or `setCurrentRawFrameValue` / `seek(%)`                                         |
 | Three.js (createThreeAdapter)      | `window.__hfThreeTime` + dispatches `CustomEvent("hf-seek", {detail:{time}})` | ESM CDN `three@0.181.2/+esm`                                    | Composition's render loop listens to `hf-seek`; pattern: `mixer.setTime(time)`                            |
 
+### Loading GSAP — from the workspace, never from a CDN
+
+The GSAP row above is the one adapter with a hard rule: load the core by a bare
+`<script src="gsap.min.js">`. `lib/gsap_runtime.py` stages the pinned copy from
+`vendor/gsap/` into every workspace (root *and* `compositions/`). A CDN fetch puts
+the network on the render path, where the two CLI steps disagree about the damage:
+`validate` fails loudly with `gsap is not defined`, but `render` exits 0 and writes
+an **un-animated MP4** carrying only a `sub_timeline_script_failure` warning. That
+silent downgrade is what `AGENT_GUIDE.md` forbids. The other adapters in the table
+still name CDNs; that is a known gap, not a licence to add one back for GSAP.
+
 ### GSAP plugins (documented patterns)
+
+`TextPlugin.min.js` and `MotionPathPlugin.min.js` are vendored and staged next to
+the core, so they load by a bare src too. Any other plugin has no local copy yet —
+vendor it into `vendor/gsap/` the same way rather than reaching for a CDN tag.
 
 - **TextPlugin** — text mutation in `tl.call` (skills/gsap/references/effects.md)
 - **MotionPathPlugin** — curve-constrained tweens (skills/hyperframes/references/techniques.md)

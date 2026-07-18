@@ -138,6 +138,24 @@ and gitignored along with the rest of `projects/`.
 - Assets live next to the HTML that references them, matching the
   `website-to-video` reference workflow.
 
+### Load GSAP from the workspace, never from a CDN
+
+Compositions must reference GSAP as `<script src="gsap.min.js"></script>`.
+`hyperframes_compose` stages the pinned copy from `vendor/gsap/` into every
+workspace (at the root *and* in `compositions/`, because `validate` loads each
+composition in isolation while `render` inlines it into `index.html` — the two
+resolve the same relative src against different directories).
+
+**Do not copy the `<script src="https://cdn.jsdelivr.net/...">` tag** that many
+`.agents/skills/hyperframes-*` examples still show. A CDN fetch puts the network
+on the render path, and the two CLI steps disagree about the consequences:
+`validate` fails loudly with `gsap is not defined`, but `render` exits 0 and
+writes an **un-animated MP4** with only a `sub_timeline_script_failure` warning.
+That silent downgrade is why `hyperframes_compose` renders with
+`--no-best-effort` (see `best_effort` in its input schema) — the same reason
+AGENT_GUIDE.md forbids hiding degraded paths. This applies to hand-authored
+atelier compositions too.
+
 ---
 
 ## Artifact → HyperFrames mapping

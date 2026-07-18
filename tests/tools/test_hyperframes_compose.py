@@ -1005,6 +1005,180 @@ def test_scaffold_workspace_generates_html_and_assets(tmp_path: Path):
     assert "#0B0F1A" in design_text or "test-playbook" in design_text
 
 
+def _minimal_scaffold(workspace: Path) -> Any:
+    return HyperFramesCompose().execute(
+        {
+            "operation": "scaffold_workspace",
+            "workspace_path": str(workspace),
+            "edit_decisions": {
+                "version": "1.0",
+                "render_runtime": "hyperframes",
+                "cuts": [
+                    {
+                        "id": "c1",
+                        "source": "",
+                        "in_seconds": 0,
+                        "out_seconds": 2,
+                        "type": "text_card",
+                        "text": "Hi",
+                    }
+                ],
+            },
+            "asset_manifest": {"assets": []},
+        }
+    )
+
+
+def test_scaffold_stages_gsap_locally_instead_of_fetching_from_a_cdn(tmp_path: Path):
+    """Regression: compositions used to load GSAP from cdn.jsdelivr.net.
+
+    Every validate/render then depended on that CDN being reachable, and when
+    the fetch failed the browser reported `gsap is not defined` — which
+    `hyperframes validate` caught (a ~50%-failing test) but `hyperframes
+    render` did not (exit 0, near-static MP4).
+    """
+    workspace = tmp_path / "hyperframes"
+    result = _minimal_scaffold(workspace)
+    assert result.success, result.error
+
+    html = (workspace / "index.html").read_text(encoding="utf-8")
+    assert "cdn.jsdelivr.net" not in html
+    assert 'src="gsap.min.js"' in html
+    assert (workspace / "gsap.min.js").is_file()
+
+
+def test_gsap_is_staged_for_both_isolated_validate_and_inlined_render(tmp_path: Path):
+    """`validate` loads compositions/*.html in isolation (src resolves against
+    compositions/), while `render` inlines them into index.html (src resolves
+    against the workspace root). One bare src needs a copy in both places.
+    """
+    workspace = tmp_path / "hyperframes"
+    assert _minimal_scaffold(workspace).success
+
+    assert (workspace / "gsap.min.js").is_file()
+    assert (workspace / "compositions" / "gsap.min.js").is_file()
+
+
+def test_render_fails_closed_on_capture_correctness_warnings(monkeypatch, tmp_path: Path):
+    """Regression: the CLI's default --best-effort exits 0 and writes an MP4
+    even when a timeline script fails to load, silently shipping an
+    un-animated video. The tool must pass --no-best-effort by default.
+    """
+    seen: dict[str, list[str]] = {}
+
+    def fake_run_hf(self, args, *, cwd, timeout, check):
+        seen[args[0]] = list(args)
+        import subprocess
+
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(HyperFramesCompose, "_run_hf", fake_run_hf)
+    monkeypatch.setattr(
+        HyperFramesCompose, "_runtime_check", lambda self: {"runtime_available": True}
+    )
+
+    HyperFramesCompose().execute(
+        {
+            "operation": "render",
+            "workspace_path": str(tmp_path / "hyperframes"),
+            "output_path": str(tmp_path / "out.mp4"),
+            "edit_decisions": {
+                "version": "1.0",
+                "render_runtime": "hyperframes",
+                "cuts": [
+                    {
+                        "id": "c1",
+                        "source": "",
+                        "in_seconds": 0,
+                        "out_seconds": 2,
+                        "type": "text_card",
+                        "text": "Hi",
+                    }
+                ],
+            },
+            "asset_manifest": {"assets": []},
+        }
+    )
+
+    assert "--no-best-effort" in seen["render"]
+
+
+def test_render_honors_best_effort_opt_out(monkeypatch, tmp_path: Path):
+    seen: dict[str, list[str]] = {}
+
+    def fake_run_hf(self, args, *, cwd, timeout, check):
+        seen[args[0]] = list(args)
+        import subprocess
+
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(HyperFramesCompose, "_run_hf", fake_run_hf)
+    monkeypatch.setattr(
+        HyperFramesCompose, "_runtime_check", lambda self: {"runtime_available": True}
+    )
+
+    HyperFramesCompose().execute(
+        {
+            "operation": "render",
+            "workspace_path": str(tmp_path / "hyperframes"),
+            "output_path": str(tmp_path / "out.mp4"),
+            "best_effort": True,
+            "edit_decisions": {
+                "version": "1.0",
+                "render_runtime": "hyperframes",
+                "cuts": [
+                    {
+                        "id": "c1",
+                        "source": "",
+                        "in_seconds": 0,
+                        "out_seconds": 2,
+                        "type": "text_card",
+                        "text": "Hi",
+                    }
+                ],
+            },
+            "asset_manifest": {"assets": []},
+        }
+    )
+
+    assert "--no-best-effort" not in seen["render"]
+
+
+def test_validate_error_surfaces_the_cli_reason_not_just_the_exit_code():
+    """Regression: a CDN outage surfaced as a bare `validate exit 1`. Callers
+    print `.error`, so the CLI's own diagnosis has to reach that string.
+    """
+    detail = HyperFramesCompose._diagnostics(
+        {
+            "exit_code": 1,
+            "report": {
+                "ok": False,
+                "errors": [
+                    {
+                        "level": "error",
+                        "text": "Failed to load gsap.min.js: net::ERR_CONNECTION_CLOSED",
+                        "url": "https://example.test/gsap.min.js",
+                    },
+                    {"level": "error", "text": "gsap is not defined"},
+                ],
+            },
+        }
+    )
+    assert "ERR_CONNECTION_CLOSED" in detail
+    assert "gsap is not defined" in detail
+
+
+def test_diagnostics_falls_back_to_stderr_when_no_json_report():
+    detail = HyperFramesCompose._diagnostics(
+        {"exit_code": 1, "stderr_tail": "Render blocked by 1 correctness warning"}
+    )
+    assert "Render blocked" in detail
+
+
+def test_diagnostics_is_empty_when_there_is_nothing_to_report():
+    assert HyperFramesCompose._diagnostics({"exit_code": 1}) == ""
+
+
 def test_scaffold_rejects_empty_cuts(tmp_path: Path):
     result = HyperFramesCompose().execute(
         {

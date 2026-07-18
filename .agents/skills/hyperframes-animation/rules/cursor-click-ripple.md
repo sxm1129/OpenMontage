@@ -96,7 +96,7 @@ Position cursor at the entry point. Button sits at its final position. Ripples a
 Build a paused timeline. Register it on `window.__timelines` with the same key as `data-composition-id` on the scene root. All tuning values are named constants — see How to Choose Values below.
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<script src="gsap.min.js"></script>
 <script>
   window.__timelines = window.__timelines || {};
   const tl = gsap.timeline({ paused: true });

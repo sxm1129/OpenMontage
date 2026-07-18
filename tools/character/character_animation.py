@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from lib.gsap_runtime import stage_gsap_beside, stage_gsap_in_workspace
 from schemas.artifacts import validate_artifact
 from tools.base_tool import (
     BaseTool,
@@ -532,6 +533,7 @@ class CharacterRigRenderer(BaseTool):
             rig_characters = [{"character_id": cid} for cid in sorted(seen_ids)] or [
                 {"character_id": "main_character"}
             ]
+        preview_gsap_src = stage_gsap_beside(output_path)
         count = len(rig_characters)
         spacing = 620 / max(count, 1)
         character_svgs = []
@@ -561,7 +563,7 @@ class CharacterRigRenderer(BaseTool):
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>Character Animation Preview</title>
-  <script src=\"https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js\"></script>
+  <script src=\"{preview_gsap_src}\"></script>
   <style>
     body {{ margin: 0; overflow: hidden; background: #9bd7ff; font-family: system-ui, sans-serif; }}
     #stage {{ width: 100vw; height: 100vh; display: grid; place-items: center; background: linear-gradient(#9bd7ff 0 65%, #75c878 65%); }}
@@ -619,6 +621,7 @@ class CharacterRigRenderer(BaseTool):
         composition_dir = workspace_path / "compositions"
         composition_dir.mkdir(parents=True, exist_ok=True)
         (workspace_path / "assets").mkdir(parents=True, exist_ok=True)
+        scene_gsap_src = stage_gsap_in_workspace(workspace_path)
         (workspace_path / "hyperframes.json").write_text(
             json.dumps(
                 {
@@ -654,7 +657,7 @@ class CharacterRigRenderer(BaseTool):
     <svg viewBox=\"0 0 640 640\" role=\"img\" aria-label=\"Character animation scene\">
 {''.join(character_svgs)}
     </svg>
-    <script src=\"https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js\"></script>
+    <script src=\"{scene_gsap_src}\"></script>
     <script>
       window.__timelines = window.__timelines || {{}};
       const tl = gsap.timeline({{ paused: true }});

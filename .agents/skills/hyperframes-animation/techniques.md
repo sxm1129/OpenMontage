@@ -300,7 +300,7 @@ The glyph subtly reshapes as axes animate — optical size adjusts detail, weigh
 Animate an element along an arbitrary SVG path. Use for sliders following curves, particles along trajectories, guided reveals.
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/MotionPathPlugin.min.js"></script>
+<script src="MotionPathPlugin.min.js"></script>
 <div class="dot" style="width:20px;height:20px;background:#2a8a7c;border-radius:50%;"></div>
 <script>
   gsap.registerPlugin(MotionPathPlugin);

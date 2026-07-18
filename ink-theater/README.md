@@ -83,4 +83,4 @@ Comic balloon that grows from the mouth, with HTML overlay text (so the webfont 
 
 ## Demos
 
-- `examples/mocap-figure/` — the pencil figure draws itself, then walks / runs / dances / kicks / sits / waves via **real CMU mocap**. Self-contained and lintable (`npx hyperframes lint ink-theater/examples/mocap-figure`); see `examples/README.md`.
+- `examples/mocap-figure/` — the pencil figure draws itself, then walks / runs / dances / kicks / sits / waves via **real CMU mocap**. Lintable (`npx hyperframes lint ink-theater/examples/mocap-figure`); see `examples/README.md`. Its scripts are all local, GSAP included — copy `vendor/gsap/gsap.min.js` into the directory first (it is gitignored there). Never swap that for a CDN tag: the fetch would sit on the render path, where a failure yields an un-animated MP4 and a zero exit code.

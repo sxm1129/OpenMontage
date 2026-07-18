@@ -235,6 +235,69 @@ def test_character_style_is_normalized_for_schema(tmp_path):
     }
 
 
+def test_character_renderer_loads_gsap_locally_not_from_a_cdn(tmp_path):
+    """Regression: the preview and the scene block fetched GSAP from
+    cdn.jsdelivr.net (and at two different pinned versions). That made every
+    render depend on the CDN — and when it failed, `hyperframes render` still
+    exited 0 and emitted an un-animated video.
+    """
+    character_design = CharacterSpecGenerator().execute(
+        {"characters": [{"id": "mouse_lead", "role": "lead", "body_type": "mouse with tail"}]}
+    ).data["character_design"]
+    rig_plan = SvgRigBuilder().execute({"character_design": character_design}).data["rig_plan"]
+    pose_library = PoseLibraryBuilder().execute({"rig_plan": rig_plan}).data["pose_library"]
+    action_timeline = ActionTimelineCompiler().execute(
+        {
+            "scene_plan": {
+                "version": "1.0",
+                "scenes": [
+                    {
+                        "id": "scene-1",
+                        "type": "character_scene",
+                        "description": "Mouse reacts to a tiny surprise.",
+                        "start_seconds": 0,
+                        "end_seconds": 1,
+                        "character_actions": [
+                            {
+                                "character_id": "mouse_lead",
+                                "emotion": "surprised",
+                                "action_sequence": ["anticipate", "perform", "settle"],
+                            }
+                        ],
+                    }
+                ],
+            },
+            "character_ids": ["mouse_lead"],
+        }
+    ).data["action_timeline"]
+
+    preview_path = tmp_path / "preview.html"
+    workspace = tmp_path / "hyperframes"
+    result = CharacterRigRenderer().execute(
+        {
+            "rig_plan": rig_plan,
+            "pose_library": pose_library,
+            "action_timeline": action_timeline,
+            "output_path": str(preview_path),
+            "workspace_path": str(workspace),
+        }
+    )
+    assert result.success, result.error
+
+    scene_html = (workspace / "compositions" / "character-scene.html").read_text(
+        encoding="utf-8"
+    )
+    preview_html = preview_path.read_text(encoding="utf-8")
+    for html in (scene_html, preview_html):
+        assert "cdn.jsdelivr.net" not in html
+        assert 'src="gsap.min.js"' in html
+
+    # Staged everywhere a loading document might resolve the bare src from.
+    assert (preview_path.parent / "gsap.min.js").is_file()
+    assert (workspace / "gsap.min.js").is_file()
+    assert (workspace / "compositions" / "gsap.min.js").is_file()
+
+
 def test_character_renderer_can_handoff_to_video_compose(tmp_path):
     hyperframes = HyperFramesCompose()
     runtime = hyperframes._runtime_check()

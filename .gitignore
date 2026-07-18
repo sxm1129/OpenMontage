@@ -103,3 +103,18 @@ venv/
 
 # Backlot local cache (thumbnails)
 .backlot/
+
+# GSAP copied beside an example, preset, or picker so it can be opened or linted
+# on its own. Those files reference GSAP by a bare src because that is what a
+# staged workspace looks like — the copy is a local convenience, not source.
+# The tracked runtime is vendor/gsap/, staged by lib/gsap_runtime.py; committing
+# more copies is how version drift starts (see vendor/THIRD_PARTY_NOTICES.md).
+.agents/skills/**/gsap.min.js
+.agents/skills/**/TextPlugin.min.js
+.agents/skills/**/MotionPathPlugin.min.js
+ink-theater/**/gsap.min.js
+.hyperframes/
+# Exception: music-to-video vendors its own GSAP for its reference templates,
+# which cite it by relative path. It is tracked on purpose and pinned separately
+# from vendor/gsap/ — see the version note in that skill.
+!.agents/skills/music-to-video/references/motion-primitives/assets/gsap.min.js

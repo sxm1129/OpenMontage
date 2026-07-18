@@ -112,7 +112,7 @@ Two cards positioned side-by-side, each rotated in opposite Y directions. Create
 ## GSAP Timeline
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<script src="gsap.min.js"></script>
 <script>
   window.__timelines = window.__timelines || {};
   const tl = gsap.timeline({ paused: true });

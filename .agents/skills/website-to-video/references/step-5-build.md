@@ -197,7 +197,7 @@ cp packages/shader-transitions/dist/index.global.js <project-dir>/hyper-shader-l
 Full working `index.html` pattern — every field matters:
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<script src="gsap.min.js"></script>
 <script src="hyper-shader-local.js"></script>
 
 <div id="root" data-composition-id="main" data-start="0" data-duration="TOTAL"
