@@ -14,6 +14,20 @@ This stage creates the actual timeline logic for short clips and any optional fu
 
 ## Process
 
+### 0. Carry `render_runtime` Forward Unchanged
+
+`render_runtime` was locked at proposal as a plain string — `"remotion"`,
+`"hyperframes"`, or `"ffmpeg"` — nothing else. Copy it into
+`edit_decisions.render_runtime` byte-for-byte. Do NOT restructure it into an
+object (e.g. `{engine, fps, resolution, ...}`) — that fabricates data the
+schema rejects (`is not of type 'string'`) and trips the render-runtime
+consistency guard, failing the job outright. Delivery specs like
+resolution/fps/aspect_ratio/output format are NOT part of this field; they
+belong to the compose stage's `profile`/`output_profile` selection (see
+`compose-director.md` and `lib/media_profiles.py`), not to `render_runtime`.
+Changing the runtime requires a logged `render_runtime_selection` decision —
+never silently.
+
 ### 1. Build Clip Timelines Fast
 
 For short-form clips:

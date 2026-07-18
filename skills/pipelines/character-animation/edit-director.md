@@ -6,7 +6,15 @@ Produce `edit_decisions` and `action_timeline`.
 
 ## Process
 
-1. Carry `render_runtime` forward from the approved proposal.
+1. Carry `render_runtime` forward from the approved proposal as the plain
+   string it is — `"remotion"`, `"hyperframes"`, or `"ffmpeg"`. Do NOT
+   restructure it into an object (e.g. `{engine, fps, resolution, ...}`) —
+   that fabricates data the schema rejects and trips the render-runtime
+   consistency guard, failing the job outright. Delivery specs like
+   resolution/fps/aspect_ratio belong to the compose stage's `profile`
+   selection (`lib/media_profiles.py`), not to this field. Changing the
+   runtime requires a logged `render_runtime_selection` decision — never
+   silently.
 2. Convert scene beats into timed character actions.
 3. Add anticipation, hold, action, and follow-through where appropriate.
 4. Align mouth/gesture beats to dialogue or music.

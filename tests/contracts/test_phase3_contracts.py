@@ -328,6 +328,31 @@ class TestSkillsExist:
         assert "## When to Use" in content
         assert "## Protocol" in content or "## Process" in content
 
+    @pytest.mark.parametrize("pipeline_name", list_pipelines())
+    def test_edit_director_carries_render_runtime_forward(self, pipeline_name):
+        """Regression: confirmed live (a full paid end-to-end run) that with no
+        instruction, the edit-stage agent fabricates render_runtime as a
+        structured object instead of copying the proposal's plain string
+        forward — edit_decisions.schema.json requires a string, so this trips
+        the render-runtime consistency guard and fails the job outright. Every
+        pipeline whose manifest requires video_compose (i.e. every pipeline
+        with a render_runtime to carry) must tell its edit-director skill to
+        preserve it unchanged.
+        """
+        manifest = load_pipeline(pipeline_name)
+        if "video_compose" not in get_required_tools(manifest):
+            pytest.skip(f"{pipeline_name} does not use video_compose")
+        skill_path = get_stage_skill(manifest, "edit")
+        if not skill_path:
+            pytest.skip(f"{pipeline_name} has no 'edit' stage")
+        full_path = self.SKILLS_DIR / f"{skill_path}.md"
+        assert full_path.exists(), f"Missing edit-director skill: {full_path}"
+        content = full_path.read_text(encoding="utf-8")
+        assert "render_runtime" in content, (
+            f"{skill_path}.md never mentions render_runtime — the edit agent "
+            f"has no instruction to carry it forward unchanged from proposal."
+        )
+
 
 # ---- Remotion Scaffold ----
 
