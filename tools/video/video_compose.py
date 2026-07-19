@@ -1432,6 +1432,53 @@ class VideoCompose(BaseTool):
         project_dir = output_path.parent.parent
         return str((project_dir / p).resolve())
 
+    @classmethod
+    def _resolve_audio_music(
+        cls,
+        edit_decisions: dict[str, Any],
+        asset_lookup: dict[str, dict[str, Any]],
+        output_path: Path,
+    ) -> dict[str, Any]:
+        """Resolve edit_decisions.audio.music.asset_id to a real `src` path,
+        the same way cuts/overlays already are via _resolve_manifest_asset_path.
+
+        edit_decisions.schema.json's audio.music ALWAYS references its asset
+        via asset_id (never a raw path) — but nothing converted that to the
+        `src` field Explainer.tsx's AudioConfig.music and _stage_public_assets
+        both require, so a templated render's music track was silently never
+        staged: Remotion got neither an asset_id it understands nor a src it
+        could serve. Confirmed live: the compose agent tried ~20 tool calls
+        across audio_enhance/audio_mixer/video_stitch chasing "Remotion can't
+        find the music asset" — asset_id was never resolved to begin with, no
+        matter what path format or volume setting was retried.
+
+        Returns edit_decisions unchanged if there's nothing to resolve (no
+        audio.music, or its asset_id isn't in the manifest — logged, not
+        raised, matching the overlay resolver's same-shaped gap).
+
+        narration.segments[] is deliberately NOT resolved here: Explainer's
+        AudioConfig models narration as ONE track (audio.narration.src), not
+        multiple independently-timed segments, so bridging segments[] would
+        silently drop every segment but one — a real design gap, not a
+        simple asset_id lookup like music.
+        """
+        audio = edit_decisions.get("audio")
+        if not isinstance(audio, dict) or not isinstance(audio.get("music"), dict):
+            return edit_decisions
+        music = audio["music"]
+        asset_id = music.get("asset_id")
+        asset = asset_lookup.get(asset_id) if asset_id else None
+        if asset is None:
+            if asset_id:
+                logging.getLogger("video_compose").warning(
+                    "audio.music.asset_id %r is not in the asset_manifest — "
+                    "the music track will not render.", asset_id,
+                )
+            return edit_decisions
+        resolved_music = dict(music)
+        resolved_music["src"] = cls._resolve_manifest_asset_path(asset["path"], output_path)
+        return {**edit_decisions, "audio": {**audio, "music": resolved_music}}
+
     def _render(self, inputs: dict[str, Any]) -> ToolResult:
         """High-level render: assemble edit decisions + asset manifest into final video.
 
@@ -1549,6 +1596,10 @@ class VideoCompose(BaseTool):
             resolved_overlays.append(resolved_overlay)
         if resolved_overlays:
             edit_decisions = {**edit_decisions, "overlays": resolved_overlays}
+
+        # Resolve audio.music.asset_id to a real `src` path — see
+        # _resolve_audio_music's docstring for why this was needed.
+        edit_decisions = self._resolve_audio_music(edit_decisions, asset_lookup, output_path)
 
         # --- Pre-compose validation gate ---
         scene_plan = inputs.get("scene_plan")

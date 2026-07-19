@@ -190,6 +190,61 @@ class TestStagePublicAssets:
             raw, Path("/tmp/output.mp4"),
         ) == raw
 
+    def test_resolve_audio_music_sets_src_from_asset_id(self, tmp_path):
+        # Regression: edit_decisions.schema.json's audio.music ALWAYS
+        # references its asset via asset_id (never a raw path) — confirmed
+        # live that nothing converted that to the `src` field Explainer.tsx's
+        # AudioConfig.music and _stage_public_assets both require, so a
+        # templated render's music track was silently never staged. The
+        # compose agent tried ~20 tool calls chasing "Remotion can't find the
+        # music asset" before concluding (wrongly) it was an environment bug.
+        project_dir = tmp_path / "projects" / "some-job"
+        track = project_dir / "assets" / "music" / "bg.mp3"
+        track.parent.mkdir(parents=True)
+        track.write_bytes(b"fake-mp3-bytes")
+        output_path = project_dir / "renders" / "final.mp4"
+        asset_lookup = {"music_primary": {"path": "assets/music/bg.mp3"}}
+        edit_decisions = {
+            "audio": {"music": {"asset_id": "music_primary", "volume": 0.35}},
+        }
+        resolved = VideoCompose._resolve_audio_music(edit_decisions, asset_lookup, output_path)
+        music = resolved["audio"]["music"]
+        assert music["src"] == str(track)
+        assert Path(music["src"]).is_file()
+        assert music["volume"] == 0.35  # other fields preserved
+        assert music["asset_id"] == "music_primary"  # not stripped, just enriched
+
+    def test_resolve_audio_music_missing_asset_id_leaves_edit_decisions_unchanged(self):
+        edit_decisions = {"audio": {"music": {"asset_id": "not_in_manifest"}}}
+        resolved = VideoCompose._resolve_audio_music(
+            edit_decisions, {}, Path("/repo/projects/job/renders/final.mp4"),
+        )
+        assert resolved is edit_decisions
+        assert "src" not in resolved["audio"]["music"]
+
+    def test_resolve_audio_music_no_music_block_is_a_no_op(self):
+        edit_decisions = {"cuts": []}
+        resolved = VideoCompose._resolve_audio_music(
+            edit_decisions, {}, Path("/repo/projects/job/renders/final.mp4"),
+        )
+        assert resolved is edit_decisions
+
+    def test_resolve_audio_music_ignores_narration_segments(self):
+        # Deliberately unresolved — Explainer's AudioConfig models narration
+        # as ONE track (audio.narration.src), not multiple independently-
+        # timed segments, so bridging segments[] would silently drop all but
+        # one. Confirm this function doesn't touch narration at all.
+        edit_decisions = {
+            "audio": {
+                "narration": {"segments": [{"asset_id": "vo1", "start_seconds": 0}]},
+                "music": {"asset_id": "not_in_manifest"},
+            },
+        }
+        resolved = VideoCompose._resolve_audio_music(
+            edit_decisions, {}, Path("/repo/projects/job/renders/final.mp4"),
+        )
+        assert resolved["audio"]["narration"] == edit_decisions["audio"]["narration"]
+
     def test_captions_and_text_are_never_mangled(self, asset):
         # Traversal is an explicit key list, not "anything that looks like a
         # path" — a caption word must survive untouched.
