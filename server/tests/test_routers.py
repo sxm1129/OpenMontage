@@ -67,6 +67,14 @@ def test_system_capabilities(client):
     assert "leapfast/ltx-2.3" in catalog["video_models"]
     assert "leapfast/flux2" in catalog["image_models"]
     assert "qwen3-tts-flash" in catalog["tts_models"]
+    # Regression: the proposal-gate render_runtime picker had no way to know
+    # which composition runtimes are actually available — render_runtime
+    # routinely reached the proposal artifact as the placeholder
+    # "PENDING_USER_APPROVAL" with no UI to resolve it. ffmpeg is always
+    # available; remotion/hyperframes are live-detected, not hardcoded.
+    engines = r.json()["composition_runtimes"]["engines"]
+    assert engines["ffmpeg"] is True
+    assert set(engines.keys()) == {"ffmpeg", "remotion", "hyperframes"}
 
 
 # ── jobs ─────────────────────────────────────────────────────────────────────

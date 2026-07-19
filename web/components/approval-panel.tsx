@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { stageLabel } from "@/components/job-status";
 import { ArtifactView } from "@/components/artifact-view";
+import { RenderRuntimeSelector, type RuntimeKey, type ModeKey } from "@/components/render-runtime-selector";
 import { apiRequest } from "@/lib/api";
 
 type SamplePreview = { text?: string; iteration?: number; max_iterations?: number };
@@ -104,9 +105,60 @@ export function ApprovalPanel({
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
 
+  // Proposal gate: render_runtime/composition_mode picker (AGENT_GUIDE's
+  // "Present Both Composition Runtimes" HARD RULE). See
+  // render-runtime-selector.tsx for why this exists — confirmed live that
+  // without it, render_runtime routinely reached this gate as the forbidden
+  // placeholder "PENDING_USER_APPROVAL" with no way to resolve it from the
+  // UI. pendingRuntime/pendingMode start null (no override) and only hold a
+  // value once the user actually clicks a card; the merge at approve time
+  // falls back to whatever production_plan already has.
+  const isProposalGate = previewArtifact === "proposal_packet";
+  const productionPlan = isProposalGate
+    ? ((currentPreview as Record<string, unknown> | null)?.production_plan as Record<string, unknown> | undefined)
+    : undefined;
+  const [pendingRuntime, setPendingRuntime] = useState<RuntimeKey | null>(null);
+  const [pendingMode, setPendingMode] = useState<ModeKey | null>(null);
+  const VALID_RUNTIMES = new Set(["remotion", "hyperframes", "ffmpeg"]);
+  const proposalRuntimeMissing =
+    isProposalGate &&
+    !VALID_RUNTIMES.has(
+      pendingRuntime ?? (productionPlan?.render_runtime as string | undefined) ?? ""
+    );
+
   async function handleApproval(action: "approve" | "reject") {
     setApproving(true);
     onError("");
+
+    // Resolve the runtime/mode picker into production_plan BEFORE approving
+    // — a gate the agent is about to act on must never carry the
+    // "PENDING_USER_APPROVAL" placeholder forward.
+    if (isProposalGate && action === "approve") {
+      const finalRuntime = pendingRuntime ?? (productionPlan?.render_runtime as string | undefined);
+      const finalMode = pendingMode ?? (productionPlan?.composition_mode as string | undefined);
+      if (finalRuntime === "PENDING_USER_APPROVAL" || !finalRuntime) {
+        onError("请先在上方选择合成引擎（render_runtime）再批准");
+        setApproving(false);
+        return;
+      }
+      if (pendingRuntime || pendingMode) {
+        const mergedPlan: Record<string, unknown> = { ...(productionPlan || {}), render_runtime: finalRuntime };
+        if (finalMode) mergedPlan.composition_mode = finalMode;
+        const mergedPacket = { ...(currentPreview as Record<string, unknown>), production_plan: mergedPlan };
+        const patchRes = await apiRequest(`/jobs/${jobId}/artifact`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ artifact_name: "proposal_packet", content: mergedPacket }),
+        });
+        if (!patchRes.ok) {
+          onError(`保存合成引擎选择失败：${patchRes.detail}`);
+          setApproving(false);
+          return;
+        }
+        setCurrentPreview(mergedPacket);
+      }
+    }
+
     const body: Record<string, unknown> = { action, feedback };
     if (action === "reject" && rejectedAssetIds.length > 0) {
       body.rejected_asset_ids = rejectedAssetIds;
@@ -255,6 +307,17 @@ export function ApprovalPanel({
             该阶段的修订次数已达上限。批准将采用当前版本继续生产;打回将停止整个任务。
           </p>
         )}
+        {/* Proposal gate: render_runtime/composition_mode picker — see the
+            AGENT_GUIDE HARD RULE note on handleApproval above. Shown even
+            in edit mode's absence check below because this is a dedicated
+            control, not the raw-JSON editor. */}
+        {isProposalGate && !editMode && (
+          <RenderRuntimeSelector
+            currentRuntime={productionPlan?.render_runtime as string | undefined}
+            currentMode={productionPlan?.composition_mode as string | undefined}
+            onChange={(runtime, mode) => { setPendingRuntime(runtime); setPendingMode(mode); }}
+          />
+        )}
         {/* Preview / editor (ordinary stage-boundary gate only) — structured
             per artifact type, raw JSON one click away (roadmap 1.2). */}
         {currentPreview && !editMode && !isSamplePreviewGate && !isRevisionsExhaustedGate && !isBudgetGate && (
@@ -313,8 +376,13 @@ export function ApprovalPanel({
 
         {/* Action buttons */}
         {!editMode && (
+          <div className="flex flex-col gap-1.5">
           <div className="flex gap-3">
-            <Button onClick={() => handleApproval("approve")} disabled={approving} className="flex-1">
+            <Button
+              onClick={() => handleApproval("approve")}
+              disabled={approving || proposalRuntimeMissing}
+              className="flex-1"
+            >
               {isBudgetGate
                 ? "✓ 批准超支，继续生产"
                 : isRevisionsExhaustedGate
@@ -335,6 +403,10 @@ export function ApprovalPanel({
                 ? `↻ 重做选中的 ${rejectedAssetIds.length} 个素材`
                 : "↩ 打回重做"}
             </Button>
+          </div>
+          {proposalRuntimeMissing && (
+            <p className="text-xs text-yellow-400">请先在上方选择合成引擎，才能批准该阶段。</p>
+          )}
           </div>
         )}
       </CardContent>

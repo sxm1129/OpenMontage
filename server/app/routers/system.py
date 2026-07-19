@@ -36,6 +36,31 @@ MODEL_CATALOG = {
 }
 
 
+def _composition_runtimes() -> dict[str, Any]:
+    """Live render-engine availability (ffmpeg/remotion/hyperframes), for the
+    proposal-gate runtime picker (AGENT_GUIDE's "Present Both Composition
+    Runtimes" HARD RULE). Reuses VideoCompose.get_info()'s own detection —
+    confirmed live this was previously invisible to the web UI entirely: the
+    wizard/proposal gate had no way to know Remotion vs HyperFrames
+    availability, so render_runtime routinely reached the proposal artifact
+    as the placeholder "PENDING_USER_APPROVAL" with no UI to resolve it,
+    requiring a human to hand-edit the artifact JSON on disk.
+    """
+    try:
+        from tools.video.video_compose import VideoCompose
+        info = VideoCompose().get_info()
+        return {
+            "engines": info.get("render_engines", {"ffmpeg": True, "remotion": False, "hyperframes": False}),
+            "remotion_note": info.get("remotion_note"),
+            "hyperframes_note": info.get("hyperframes_note"),
+        }
+    except Exception:
+        # Fail open to "only ffmpeg" rather than 500ing the whole capabilities
+        # response — the picker still renders, just conservatively.
+        return {"engines": {"ffmpeg": True, "remotion": False, "hyperframes": False},
+                "remotion_note": None, "hyperframes_note": None}
+
+
 @router.get("/capabilities")
 async def capabilities():
     """Which storage/queue/auth adapter is live, plus the planned roadmap.
@@ -44,9 +69,15 @@ async def capabilities():
     `llm_model` reflects MAAS_LLM_MODEL if set, so the settings page can't
     drift out of sync with the model actually driving the pipeline the way
     a hardcoded display string would. `model_catalog` serves the same
-    purpose for the wizard's video/image/TTS model pickers.
+    purpose for the wizard's video/image/TTS model pickers. `composition_runtimes`
+    backs the proposal-gate render_runtime picker.
     """
-    return {"backends": active_backends(), "llm_model": LLM_MODEL, "model_catalog": MODEL_CATALOG}
+    return {
+        "backends": active_backends(),
+        "llm_model": LLM_MODEL,
+        "model_catalog": MODEL_CATALOG,
+        "composition_runtimes": _composition_runtimes(),
+    }
 
 
 class EstimateRequest(BaseModel):
