@@ -40,6 +40,38 @@ instead. Copy both forward unchanged from `production_plan.renderer_family`
 `edit_decisions.composition_mode` — same rule as `render_runtime`: no
 inventing, no omitting, no restructuring.
 
+### 0b. Native Title/Text Cards Use `cut.text`, Never A Fabricated Asset
+
+For `render_runtime="remotion"` (non-atelier / templated path), a title card,
+slogan card, or hero-title beat is a **native Remotion component**, not a
+media file. Author it directly as a cut:
+
+```json
+{
+  "id": "cut_sc05_title",
+  "type": "hero_title",
+  "text": "一整天",
+  "in_seconds": 19,
+  "out_seconds": 23
+}
+```
+
+Recognized native types and their required field: `text_card` (`cut.text`),
+`hero_title` (`cut.text`, optional `cut.heroSubtitle`), `stat_card`
+(`cut.stat`), `callout` (`cut.text`), `comparison` (`cut.leftLabel` /
+`cut.rightLabel` / `cut.leftValue` / `cut.rightValue`). See
+`remotion-composer/src/Explainer.tsx` for the full list and field names.
+
+Do **not** invent an `asset_manifest` entry with a placeholder path (e.g.
+`assets/title_cards/x.remotion`) and point `cut.source` at it — there is no
+file there. Confirmed live (2026-07-19): a cut shaped this way resolves to a
+real-looking absolute path that doesn't exist, which `video_compose` now
+rejects outright before rendering ("local asset path(s) ... do not exist on
+disk") rather than letting it reach Remotion as an opaque proxy error. If the
+asset stage already logged such an entry with `format: "remotion_component"`,
+that's fine as a planning record — just don't let `cut.source` reference it;
+give the cut its own `text` field instead.
+
 ### 1. Cut By Emotion First
 
 Cuts should follow:
