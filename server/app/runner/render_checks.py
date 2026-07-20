@@ -120,6 +120,33 @@ def _render_report_path_diverges(
     return None
 
 
+def _resolve_claimed_path(claimed: str, project_dir: Path) -> Path:
+    """Resolve a publish_log-claimed path against project_dir, tolerating the
+    same repo-root-relative form _anchor_output_path already tolerates on the
+    write side (tool_bridge.py) — e.g. "projects/<slug>/renders/x.mp4" as well
+    as the plain project-relative "renders/x.mp4".
+
+    Confirmed live: an agent wrote every publish_log export_path with the
+    full "projects/<slug>/..." prefix (a reasonable, unambiguous-looking
+    choice from its side) — joining that directly onto project_dir (which
+    IS already ".../projects/<slug>") doubly-nested it into a path that can
+    never exist, so this check hard-failed a publish_log whose 4 claimed
+    files were all genuinely on disk. Try the direct join first (the common
+    case), then the slug-stripped form.
+    """
+    if Path(claimed).is_absolute():
+        return Path(claimed)
+    direct = project_dir / claimed
+    if direct.exists():
+        return direct
+    parts = Path(claimed).parts
+    if len(parts) >= 2 and parts[0] == "projects" and parts[1] == project_dir.name:
+        stripped = project_dir.joinpath(*parts[2:])
+        if stripped.exists():
+            return stripped
+    return direct
+
+
 def _validate_publish_log_exports(project_dir: Path, publish_log: dict) -> list[str]:
     """Return the publish_log-claimed export_paths that have NO real file on
     disk, for every entry whose status implies a file was actually produced.
@@ -145,7 +172,7 @@ def _validate_publish_log_exports(project_dir: Path, publish_log: dict) -> list[
             # is_file()-only check hard-failed every genuine export_bundle
             # run. A directory counts as real only when it contains at
             # least one file — an empty dir proves nothing was exported.
-            p = project_dir / export_path
+            p = _resolve_claimed_path(export_path, project_dir)
             if not (p.is_file() or (p.is_dir() and any(f.is_file() for f in p.rglob("*")))):
                 missing.append(export_path)
     return missing

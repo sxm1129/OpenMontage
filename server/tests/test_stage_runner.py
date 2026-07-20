@@ -935,6 +935,24 @@ def test_validate_publish_log_exports_passes_when_file_exists(tmp_path):
     assert _validate_publish_log_exports(tmp_path, publish_log) == []
 
 
+def test_validate_publish_log_exports_tolerates_repo_root_relative_prefix(tmp_path):
+    # Confirmed live 2026-07-19: an agent wrote every export_path with the
+    # full "projects/<slug>/..." prefix (matching the same repo-root-
+    # relative convention seen elsewhere this session) — joining that
+    # directly onto project_dir (which IS already .../projects/<slug>)
+    # doubly-nested it into a path that could never exist, hard-failing a
+    # publish_log whose files were all genuinely on disk.
+    project_dir = tmp_path / "projects" / "some-job"
+    (project_dir / "renders").mkdir(parents=True)
+    (project_dir / "renders" / "teaser.mp4").write_bytes(b"x")
+    publish_log = {"entries": [
+        {"platform": "youtube", "status": "exported",
+         "export_path": "projects/some-job/renders/teaser.mp4",
+         "timestamp": "2026-01-01T00:00:00Z"},
+    ]}
+    assert _validate_publish_log_exports(project_dir, publish_log) == []
+
+
 def test_validate_publish_log_exports_ignores_non_completed_statuses(tmp_path):
     # "failed"/"pending_review" entries don't claim a real file was produced
     # — must not be flagged even though no file exists.
