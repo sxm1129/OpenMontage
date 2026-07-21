@@ -1004,6 +1004,24 @@ After writing the artifact, confirm briefly what you produced.
             _emit(job_id, {"type": "error", "stage": stage_name, "message": str(e)})
             return False
 
+        if not response.choices:
+            # Confirmed live: the MaaS gateway can return a 200 with an
+            # empty choices list (no exception from the SDK call above, so
+            # the except block never fires) — e.g. an upstream content-
+            # filter trip or provider hiccup swallowed into a degenerate
+            # success response. `response.choices[0]` then raised a bare
+            # IndexError that unwound all the way past the per-stage retry
+            # machinery to job_failed — "Unhandled pipeline error: list
+            # index out of range" told the user nothing about the real
+            # cause. Treat it exactly like the exception case above so the
+            # existing stage-retry logic gets a chance instead.
+            _emit(job_id, {
+                "type": "error",
+                "stage": stage_name,
+                "message": "LLM gateway returned no choices (empty response) — retrying.",
+            })
+            return False
+
         msg = response.choices[0].message
         finish = response.choices[0].finish_reason
 

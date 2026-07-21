@@ -310,6 +310,29 @@ def test_no_tool_calls_ends_stage(tmp_path, monkeypatch):
     assert not (tmp_path / "artifacts").exists()  # no tool ran
 
 
+def test_empty_choices_response_fails_stage_instead_of_crashing_job(tmp_path, monkeypatch):
+    # Confirmed live: the MaaS gateway can return a 200 with choices=[] (no
+    # exception from the SDK call, so the surrounding try/except never
+    # fires) — response.choices[0] then raised a bare IndexError that
+    # unwound past the per-stage retry machinery straight to job_failed
+    # ("Unhandled pipeline error: list index out of range"), telling the
+    # user nothing about the real cause. Must be caught and treated like
+    # any other per-turn LLM failure (emit + return False), not crash the
+    # whole run_pipeline_job coroutine.
+    empty = SimpleNamespace(choices=[])
+    monkeypatch.setattr(
+        stage_runner.llm.chat.completions, "create",
+        lambda **kw: empty,
+    )
+    emitted = []
+    monkeypatch.setattr(stage_runner, "_emit", lambda job_id, event: emitted.append(event))
+
+    ok = stage_runner._run_agent_stage("job-empty-choices", "research", "skill", tmp_path, {}, {})
+
+    assert ok is False
+    assert any(e.get("type") == "error" for e in emitted)
+
+
 # ── cancellation: checked once per turn, not just between stages ────────────
 
 def test_cancel_requested_stops_mid_turn_without_calling_the_llm(tmp_path, monkeypatch):
