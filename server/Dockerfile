@@ -1,7 +1,16 @@
 FROM python:3.12-slim
 
+# curl is also how NodeSource's setup script is fetched below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg curl \
+    ffmpeg curl ca-certificates gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22, needed for the Remotion render path (tools/video/video_compose.py
+# shells out to `npx remotion render` — this image previously had no Node at
+# all, so render_runtime="remotion" always reported unavailable). Debian
+# trixie's own apt repo doesn't carry a recent-enough Node, hence NodeSource.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -13,6 +22,19 @@ RUN pip install --no-cache-dir -r /tmp/server_requirements.txt
 # Install OpenMontage core deps
 COPY requirements.txt /tmp/om_requirements.txt
 RUN pip install --no-cache-dir -r /tmp/om_requirements.txt || true
+
+# remotion-composer is NOT a docker-compose volume mount (unlike tools/lib/
+# etc below) — its node_modules (and the headless-shell browser binary
+# baked in by `remotion browser ensure`) must live inside the image, and a
+# host bind-mount would shadow them with whatever (or nothing) is on the
+# host's own remotion-composer/node_modules. video_compose.py resolves this
+# directory as Path(__file__).parent.parent.parent / "remotion-composer",
+# i.e. relative to tools/video/video_compose.py once tools/ is mounted at
+# /app/tools — so it MUST land at exactly /app/remotion-composer.
+COPY remotion-composer/ /app/remotion-composer/
+RUN cd /app/remotion-composer \
+    && npm install --no-audit --no-fund \
+    && npx remotion browser ensure
 
 # Copy source (tools/lib/etc mounted via docker-compose volumes in dev)
 COPY server/ /app/server/
